@@ -1,0 +1,25 @@
+# Pinned upstream sources for CrescendoKit's binary components.
+#
+# The build scripts refuse to build anything not recorded here: the version
+# pins what gets downloaded, and the SHA-256 is verified against the
+# downloaded tarball BEFORE extraction, fail-closed. FFmpeg tarballs are
+# additionally verified against the detached GPG signature published on
+# ffmpeg.org, using the release signing key committed at
+# Keys/ffmpeg-signing-key.asc (fingerprint
+# FCF986EA15E6E293A5644F10B4322F04D67658D8, cross-checked against ffmpeg.org).
+# TagLib publishes no release signatures, so its anchor is the hash pin.
+#
+# This file is the ONLY source of truth for what gets built: the scripts
+# take no version argument. To update a dependency:
+#   1. Run the script with --check-updates to discover the latest version.
+#   2. Set the new version here and CLEAR its SHA256 line.
+#   3. Run the script: it downloads, verifies what it can (FFmpeg's GPG
+#      signature always), prints the tarball's SHA-256, and stops.
+#   4. Adopt the printed hash here, commit the change for review, and rerun
+#      to build. Never copy a hash you have not deliberately chosen.
+
+FFMPEG_VERSION=8.1.1
+FFMPEG_SHA256=b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3
+
+TAGLIB_VERSION=2.3
+TAGLIB_SHA256=7349f6fd942418bc7009ebe743eb7c9d055f02921ec56fa436ec25007c47fd38
