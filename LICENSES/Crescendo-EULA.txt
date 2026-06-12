@@ -1,0 +1,86 @@
+CRESCENDO END USER LICENSE AGREEMENT
+
+Copyright (c) 2026 Kushal Pandya. All rights reserved.
+
+This agreement governs the binary artifacts of the Crescendo audio engine
+distributed through the CrescendoKit package
+(https://github.com/kushalpandya/CrescendoKit), namely
+Crescendo.xcframework and Crescendo.doccarchive (the "Software").
+
+"Petrichor" means the open source music player application published at
+https://github.com/kushalpandya/Petrichor, including modified versions of
+it built from that source code (for example forks and contribution
+branches).
+
+1. LICENSE GRANT
+
+Subject to the terms of this agreement, you are granted a non-exclusive,
+non-transferable, royalty-free license to:
+
+  a. download and link the Software solely to build, run, test, and
+     develop Petrichor; and
+
+  b. redistribute the Software, unmodified, solely as embedded within a
+     build of Petrichor that is distributed free of charge.
+
+No other rights are granted. In particular, you may not use the Software
+in, or distribute it with, any application other than Petrichor. For any
+other use, contact the author for written permission.
+
+2. RESTRICTIONS
+
+You may not: (a) modify, adapt, or create derivative works of the
+Software; (b) redistribute the Software on a standalone basis; (c) remove
+or alter any copyright or license notices in or accompanying the
+Software; or (d) decompile, disassemble, or reverse engineer the
+Software, except (i) to the extent such a restriction is prohibited by
+applicable law, and (ii) to the extent necessary to debug your
+modifications to the open source components described in section 3, as
+the licenses of those components require this to be permitted.
+
+3. OPEN SOURCE COMPONENTS
+
+The Software dynamically links against CFFmpeg.xcframework (FFmpeg,
+licensed under the GNU Lesser General Public License v2.1 or later) and
+CTagLib.xcframework (TagLib, used under the Mozilla Public License 1.1).
+Those frameworks are separate works, are not covered by this agreement,
+and are governed solely by their own licenses, whose texts ship inside
+each framework. Nothing in this agreement limits any rights granted to
+you by those licenses.
+
+Petrichor's own source code is licensed separately under the MIT
+License. That license covers Petrichor's source code only and does not
+grant any rights to the Software.
+
+4. OWNERSHIP
+
+The Software is licensed, not sold. The author retains all right, title,
+and interest in and to the Software.
+
+5. TERMINATION
+
+This license terminates automatically if you breach any of its terms.
+Upon termination you must stop using the Software and destroy all copies
+in your possession, except as embedded in builds of Petrichor you
+received in compliance with this agreement.
+
+6. DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+7. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN
+AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OF OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+8. RELEASES
+
+Each CrescendoKit release is governed by the copy of this agreement that
+accompanies it. The author may change these terms for future releases;
+such changes do not apply retroactively to artifacts you already
+obtained.

@@ -31,12 +31,12 @@ import Crescendo
 
 Release packages include prebuilt XCFrameworks (macOS Apple Silicon for now, other platforms in future):
 
-| Framework               | Description                                       | License           |
-| ----------------------- | ------------------------------------------------- | ----------------- |
-| `CFFmpeg.xcframework`   | FFmpeg, audio-only LGPL build, dynamically linked | LGPL 2.1+         |
-| `CTagLib.xcframework`   | TagLib + a thin C shim (source in `Shims/`)       | MPL 1.1 (elected) |
-| `Crescendo.xcframework` | The playback engine (binary-only)                 | Proprietary       |
-| `Crescendo.doccarchive` | Public API documentation                          | Proprietary       |
+| Framework               | Description                                       | License            |
+| ----------------------- | ------------------------------------------------- | ------------------ |
+| `CFFmpeg.xcframework`   | FFmpeg, audio-only LGPL build, dynamically linked | LGPL 2.1+          |
+| `CTagLib.xcframework`   | TagLib + a thin C shim (source in `Shims/`)       | MPL 1.1 (elected)  |
+| `Crescendo.xcframework` | The playback engine (binary-only)                 | Proprietary (EULA) |
+| `Crescendo.doccarchive` | Public API documentation                          | Proprietary (EULA) |
 
 The product lists all four because Crescendo links `CFFmpeg` and `CTagLib` via
 `@rpath`; consumers embed all three XCFrameworks automatically.
@@ -59,8 +59,12 @@ FFmpeg downloads are additionally verified against the FFmpeg release signing ke
 Run either script with `--check-updates` to compare the pins against the latest upstream releases;
 the lock file's comments describe the update workflow.
 
-## Licensing
+## License
 
+See [LICENSE.md](LICENSE.md) for the full map. In short:
+
+- **This repository's source** (build scripts, `Shims/`, manifest) is
+  [MIT](LICENSES/MIT.txt).
 - **FFmpeg** is built LGPL-only (no GPL, no non-free components; TLS via
   Apple SecureTransport) and consumed as a dynamic framework, keeping it
   replaceable per LGPL §6. The license text ships inside the framework
@@ -70,8 +74,9 @@ the lock file's comments describe the update workflow.
   **MPL 1.1**. The license text ships inside the framework
   (`Resources/COPYING.MPL`); TagLib's source is used unmodified, and the shim
   source is published in `Shims/`.
-- **Crescendo** is a proprietary binary. If you want to use it, please get in
-  touch.
+- **Crescendo** is a proprietary binary, licensed under the
+  [Crescendo EULA](LICENSES/Crescendo-EULA.txt). For uses beyond its scope,
+  please get in touch.
 
 ## Author
 
