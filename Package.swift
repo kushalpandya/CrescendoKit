@@ -1,10 +1,11 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
 
 // CrescendoKit: binary distribution of the Crescendo audio engine.
 //
 // Vends three prebuilt XCFrameworks as one product:
-//   - Crescendo  (the engine; proprietary binary)
+//   - Crescendo  (the engine; proprietary binary, see LICENSE.md)
 //   - CFFmpeg    (FFmpeg, LGPL 2.1+, dynamically linked and replaceable)
 //   - CTagLib    (TagLib, MPL 1.1 elected)
 //
@@ -13,8 +14,42 @@ import PackageDescription
 // via @rpath, and listing them together makes every consumer embed the full
 // trio automatically. Consumers `import Crescendo`.
 //
-// PROTOTYPE STATE: binary targets point at local paths. The release flow
-// replaces them with public release-asset URLs plus checksums.
+// Two consumption modes per target:
+//
+//   1. Remote (default for consumers)
+//      SwiftPM downloads each zip from this repo's release assets at the
+//      stable per-tag URLs below and verifies its checksum. The URL and
+//      checksum lines are rewritten by the release flow
+//      (Crescendo's Scripts/release.sh); do not edit them by hand.
+//
+//   2. Local (for development)
+//      Set CRESCENDOKIT_LOCAL=1 in the environment and SwiftPM consumes the
+//      artifacts staged in build/artifacts (produced by Scripts/build-*.sh
+//      and the engine's build, staged by the release flow) instead of
+//      downloading. Until the first release populates the checksums, the
+//      placeholder values make local mode the automatic fallback.
+
+let crescendoURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/UNRELEASED/Crescendo.xcframework.zip"
+let crescendoChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
+let cffmpegURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/UNRELEASED/CFFmpeg.xcframework.zip"
+let cffmpegChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
+let ctaglibURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/UNRELEASED/CTagLib.xcframework.zip"
+let ctaglibChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
+let placeholderChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
+let useLocal = ProcessInfo.processInfo.environment["CRESCENDOKIT_LOCAL"] == "1"
+    || crescendoChecksum == placeholderChecksum
+    || cffmpegChecksum == placeholderChecksum
+    || ctaglibChecksum == placeholderChecksum
+
+func binaryTarget(name: String, url: String, checksum: String) -> Target {
+    useLocal
+        ? .binaryTarget(name: name, path: "build/artifacts/\(name).xcframework")
+        : .binaryTarget(name: name, url: url, checksum: checksum)
+}
 
 let package = Package(
     name: "CrescendoKit",
@@ -25,8 +60,8 @@ let package = Package(
         .library(name: "Crescendo", targets: ["Crescendo", "CFFmpeg", "CTagLib"])
     ],
     targets: [
-        .binaryTarget(name: "Crescendo", path: "build/artifacts/Crescendo.xcframework"),
-        .binaryTarget(name: "CFFmpeg", path: "build/artifacts/CFFmpeg.xcframework"),
-        .binaryTarget(name: "CTagLib", path: "build/artifacts/CTagLib.xcframework")
+        binaryTarget(name: "Crescendo", url: crescendoURL, checksum: crescendoChecksum),
+        binaryTarget(name: "CFFmpeg", url: cffmpegURL, checksum: cffmpegChecksum),
+        binaryTarget(name: "CTagLib", url: ctaglibURL, checksum: ctaglibChecksum)
     ]
 )
