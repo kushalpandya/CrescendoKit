@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# build-ffmpeg.sh - Builds FFmpeg as a macOS arm64 XCFramework for Crescendo.
+# build-ffmpeg.sh - Builds FFmpeg as a macOS universal (arm64 + x86_64)
+# XCFramework for Crescendo.
 #
 # Output: build/artifacts/CFFmpeg.xcframework  (+ .zip + .checksum)
 #
@@ -9,9 +10,11 @@
 # so no OpenSSL/GnuTLS dependency). It is built static, then merged into a
 # single dynamic library inside CFFmpeg.framework. Crescendo dynamically links
 # to that framework - that is the LGPL boundary. The pin in upstream.lock,
-# this script, and the shipped license text satisfy LGPL §6. Single-arch
-# (macOS arm64); iOS / tvOS slices can be added later by parameterizing
-# build_static_libs and create_framework on SDK + min-os.
+# this script, and the shipped license text satisfy LGPL §6. FFmpeg's configure
+# is single-arch, so each macOS arch is built and installed separately, then
+# lipo'd into one universal framework binary. iOS / tvOS slices can be added
+# later by parameterizing build_static_libs and create_framework on SDK + min-os.
+# Building the x86_64 slice assembles FFmpeg's SIMD with nasm (brew install nasm).
 #
 # Supply-chain posture (fail-closed):
 #   - The version comes from upstream.lock; the downloaded tarball must match
@@ -49,7 +52,7 @@ LOCK_FILE="${ROOT_DIR}/upstream.lock"
 SIGNING_KEY="${ROOT_DIR}/Keys/ffmpeg-signing-key.asc"
 LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CFFmpeg"
-MIN_MACOS="15.0"
+MIN_MACOS="14.0"
 
 # Resolved by resolve_version from upstream.lock, the only source of truth
 # for what gets built. An empty hash means the pin is mid-update: the run
@@ -308,8 +311,8 @@ The bytes do not match the reviewed pin; do not build from them."
     fi
 }
 
-# Removes leftover state from prior multi-platform attempts so the new
-# single-slice build cannot accidentally pick up stale x86_64 / iOS dylibs.
+# Removes leftover state from prior builds so a new build cannot pick up stale
+# per-arch install trees, merged dylibs, or frameworks.
 clean_stale_state() {
     rm -rf \
         "${BUILD_DIR}/install" \
@@ -339,10 +342,17 @@ download_ffmpeg() {
     rm "$tarball" "${tarball}.asc"
 }
 
+# Configures, compiles, and installs the static libs for a single arch ($1,
+# arm64 or x86_64) under install/macos-<arch>. FFmpeg cannot emit a fat build
+# from one configure pass, so this runs once per arch; the slices are merged in
+# create_framework. --enable-cross-compile keeps configure from running the
+# compiled probes (it cannot execute the x86_64 ones on an arm64 host, and the
+# arm64 path has always used it too), relying on compile/link tests instead.
 build_static_libs() {
-    local prefix="${BUILD_DIR}/install/macos-arm64"
+    local arch="$1"
+    local prefix="${BUILD_DIR}/install/macos-${arch}"
     local src_dir="${BUILD_DIR}/ffmpeg-${FFMPEG_VERSION}"
-    local work="${BUILD_DIR}/build-macos-arm64"
+    local work="${BUILD_DIR}/build-macos-${arch}"
 
     rm -rf "$prefix" "$work"
     mkdir -p "$work"
@@ -352,45 +362,46 @@ build_static_libs() {
     cc="$(xcrun -sdk macosx -find clang)"
     sysroot="$(xcrun -sdk macosx --show-sdk-path)"
 
-    run_logged "Configuring FFmpeg ${FFMPEG_VERSION} (macOS arm64, audio-only, LGPL)..." \
+    # -Wno-deprecated-declarations silences the upstream SecureTransport warnings
+    # from tls_securetransport.c (deprecated since 10.15, but enabled on purpose
+    # to keep TLS dependency-free for LGPL). One benign -Wunused-function warning
+    # from rawdec.c remains: FFmpeg re-enables -Wall after extra-cflags, so it
+    # cannot be suppressed here without patching the upstream build. Warning flags
+    # do not affect codegen, so this does not change the produced binary.
+    run_logged "Configuring FFmpeg ${FFMPEG_VERSION} (macOS ${arch}, audio-only, LGPL)..." \
         "$src_dir/configure" \
         --prefix="$prefix" \
         --target-os=darwin \
-        --arch=arm64 \
+        --arch="${arch}" \
         --cc="$cc" \
-        --extra-cflags="-arch arm64 -mmacosx-version-min=${MIN_MACOS} -isysroot ${sysroot}" \
-        --extra-ldflags="-arch arm64 -mmacosx-version-min=${MIN_MACOS}" \
+        --extra-cflags="-arch ${arch} -mmacosx-version-min=${MIN_MACOS} -isysroot ${sysroot} -Wno-deprecated-declarations" \
+        --extra-ldflags="-arch ${arch} -mmacosx-version-min=${MIN_MACOS}" \
         --enable-cross-compile \
         --sysroot="$sysroot" \
         "${CONFIGURE_FLAGS[@]}"
 
-    run_logged "Compiling..." make -j"$(sysctl -n hw.ncpu)"
-    run_logged "Installing..." make install
+    run_logged "Compiling (${arch})..." make -j"$(sysctl -n hw.ncpu)"
+    run_logged "Installing (${arch})..." make install
 
     cd "$ROOT_DIR"
 }
 
-create_framework() {
-    local prefix="${BUILD_DIR}/install/macos-arm64"
-    local fw_root="${BUILD_DIR}/frameworks/macos-arm64/${FRAMEWORK_NAME}.framework"
-    local versioned="$fw_root/Versions/A"
-
-    rm -rf "$fw_root"
-    mkdir -p "$versioned/Headers" "$versioned/Modules" "$versioned/Resources"
-
-    log "Building ${FRAMEWORK_NAME}.framework..."
-
-    local sdk_path
+# Links the four static FFmpeg libs under prefix $2 into a single-arch dynamic
+# library at $3 for arch $1. -force_load on each archive pulls in every object
+# file (FFmpeg modules register codecs/demuxers via constructor symbols that ld
+# would otherwise strip as "unused"). -Wl,-x drops local symbols (internal
+# backtrace names) from the symbol table; exported symbols stay, so the engine
+# still links every codec it uses, just with a smaller binary.
+link_framework_slice() {
+    local arch="$1" prefix="$2" out="$3" sdk_path
     sdk_path="$(xcrun -sdk macosx --show-sdk-path)"
 
-    # -force_load on each archive pulls in every object file (FFmpeg modules
-    # register codecs/demuxers via constructor symbols that ld would otherwise
-    # strip as "unused").
     xcrun -sdk macosx clang \
-        -arch arm64 \
+        -arch "$arch" \
         -mmacosx-version-min="${MIN_MACOS}" \
         -isysroot "$sdk_path" \
         -dynamiclib \
+        -Wl,-x \
         -install_name "@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}" \
         -compatibility_version 1 \
         -current_version "${FFMPEG_VERSION%%.*}" \
@@ -403,9 +414,32 @@ create_framework() {
         -framework AudioToolbox \
         -framework CoreMedia \
         -framework Security \
-        -o "$versioned/${FRAMEWORK_NAME}"
+        -o "$out"
+}
 
-    cp -R "${prefix}/include/"* "$versioned/Headers/"
+create_framework() {
+    local arm_prefix="${BUILD_DIR}/install/macos-arm64"
+    local x86_prefix="${BUILD_DIR}/install/macos-x86_64"
+    local fw_root="${BUILD_DIR}/frameworks/macos-arm64_x86_64/${FRAMEWORK_NAME}.framework"
+    local versioned="$fw_root/Versions/A"
+
+    rm -rf "$fw_root"
+    mkdir -p "$versioned/Headers" "$versioned/Modules" "$versioned/Resources"
+
+    log "Building ${FRAMEWORK_NAME}.framework (universal arm64 + x86_64)..."
+
+    # Link each arch separately from its own static libs, then lipo the two
+    # single-arch dylibs into one fat framework binary.
+    local arm_dylib="${BUILD_DIR}/merged-arm64.dylib"
+    local x86_dylib="${BUILD_DIR}/merged-x86_64.dylib"
+    link_framework_slice arm64  "$arm_prefix" "$arm_dylib"
+    link_framework_slice x86_64 "$x86_prefix" "$x86_dylib"
+    lipo -create "$arm_dylib" "$x86_dylib" -output "$versioned/${FRAMEWORK_NAME}"
+    rm -f "$arm_dylib" "$x86_dylib"
+
+    # Public headers are arch-independent (avconfig.h is identical for both
+    # little-endian 64-bit arches), so either install tree serves.
+    cp -R "${arm_prefix}/include/"* "$versioned/Headers/"
 
     # FFmpeg headers use quoted includes that resolve relative to the file,
     # so libavformat/foo.h's `#include "libavcodec/bar.h"` doesn't resolve
@@ -490,7 +524,7 @@ PLIST
 }
 
 create_xcframework() {
-    local fw="${BUILD_DIR}/frameworks/macos-arm64/${FRAMEWORK_NAME}.framework"
+    local fw="${BUILD_DIR}/frameworks/macos-arm64_x86_64/${FRAMEWORK_NAME}.framework"
     local xcfw="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
     rm -rf "$xcfw"
 
@@ -510,7 +544,7 @@ publish() {
 
     # Post-build compliance gate: the license text must have survived into
     # the published artifact.
-    [ -f "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64/${FRAMEWORK_NAME}.framework/Resources/COPYING.LGPLv2.1" ] \
+    [ -f "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64/${FRAMEWORK_NAME}.framework/Resources/COPYING.LGPLv2.1" ] \
         || error "Published XCFramework is missing COPYING.LGPLv2.1"
 
     # Codesign the XCFramework when an identity is provided (Xcode 15+
@@ -566,8 +600,9 @@ main() {
     command -v curl   >/dev/null || error "curl not found in PATH"
     command -v gpg    >/dev/null || error "gpg not found; install it with: brew install gnupg (required to verify FFmpeg release signatures)"
     command -v shasum >/dev/null || error "shasum not found in PATH"
+    command -v nasm   >/dev/null || error "nasm not found; install it with: brew install nasm (required to assemble FFmpeg's x86_64 SIMD for the universal build)"
 
-    log "FFmpeg XCFramework builder - macOS arm64, LGPL audio-only"
+    log "FFmpeg XCFramework builder - macOS universal (arm64 + x86_64), LGPL audio-only"
     [ "$MODE" = "--check-updates" ] && check_updates
     [ -z "$MODE" ] || error "Unknown argument '$MODE'. The build takes no version argument; edit upstream.lock to change what gets built (--check-updates to compare pins)."
     resolve_version
@@ -579,7 +614,8 @@ main() {
 
     clean_stale_state
     download_ffmpeg
-    build_static_libs
+    build_static_libs arm64
+    build_static_libs x86_64
     create_framework
     create_xcframework
     publish

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# build-taglib.sh - Builds TagLib + the CTagLib C shim as a macOS arm64
-# dynamic XCFramework for Crescendo.
+# build-taglib.sh - Builds TagLib + the CTagLib C shim as a macOS universal
+# (arm64 + x86_64) dynamic XCFramework for Crescendo.
 #
 # Output: build/artifacts/CTagLib.xcframework  (+ .zip + .checksum)
 #
@@ -54,7 +54,7 @@ SHIM_DIR="${ROOT_DIR}/Shims/TagLib"
 LOCK_FILE="${ROOT_DIR}/upstream.lock"
 LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CTagLib"
-MIN_MACOS="15.0"
+MIN_MACOS="14.0"
 
 # Resolved by resolve_version from upstream.lock, the only source of truth
 # for what gets built. An empty hash means the pin is mid-update: the run
@@ -212,14 +212,16 @@ download_taglib() {
     [ -d "$SRC_DIR" ] || error "Extraction did not produce ${SRC_DIR}"
 }
 
-# Builds a static libtag.a (Release, arm64, hidden visibility, hardened) and
-# installs it plus the public headers under build/taglib/install.
+# Builds a static libtag.a (Release, universal arm64 + x86_64, hidden
+# visibility, hardened) and installs it plus the public headers under
+# build/taglib/install. CMake emits both arches in one pass via
+# CMAKE_OSX_ARCHITECTURES, so libtag.a is already a fat archive.
 build_taglib() {
     PREFIX="${BUILD_DIR}/install"
     local cmake_build="${BUILD_DIR}/cmake-build"
     rm -rf "$PREFIX" "$cmake_build"
 
-    run_logged "Configuring TagLib ${TAGLIB_VERSION} (cmake, static, arm64, hardened)..." \
+    run_logged "Configuring TagLib ${TAGLIB_VERSION} (cmake, static, arm64 + x86_64, hardened)..." \
         "$CMAKE" -S "$SRC_DIR" -B "$cmake_build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
@@ -227,7 +229,7 @@ build_taglib() {
         -DBUILD_BINDINGS=OFF \
         -DBUILD_TESTING=OFF \
         -DWITH_ZLIB=ON \
-        -DCMAKE_OSX_ARCHITECTURES=arm64 \
+        -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_MACOS}" \
         -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
         -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
@@ -255,12 +257,14 @@ create_framework() {
     local sysroot
     sysroot="$(xcrun -sdk macosx --show-sdk-path)"
 
-    # Compile the shim against TagLib's installed headers.
+    # Compile the shim against TagLib's installed headers. Two -arch flags make
+    # clang emit a fat object, matching the universal libtag.a it links against.
     xcrun -sdk macosx clang++ \
         -c "${SHIM_DIR}/ctaglib.cpp" \
         -o "${work}/ctaglib.o" \
         -std=c++17 \
         -arch arm64 \
+        -arch x86_64 \
         -mmacosx-version-min="${MIN_MACOS}" \
         -isysroot "$sysroot" \
         -I"${SHIM_DIR}" \
@@ -272,11 +276,17 @@ create_framework() {
     # Link the shim + TagLib into one dynamic library. libc++ and libz are
     # dynamic system libraries. FileRef references every format parser directly,
     # so the normal link pulls them all in (full format coverage).
+    # -Wl,-x drops local symbols from the symbol table. TagLib is compiled with
+    # hidden visibility, so its C++ symbols are already non-exported; stripping
+    # the local entries leaves only the 18 CTAGLIB_API exports and shrinks the
+    # binary substantially (the hidden C++ names dominate the string table).
     xcrun -sdk macosx clang++ \
         -dynamiclib \
         -arch arm64 \
+        -arch x86_64 \
         -mmacosx-version-min="${MIN_MACOS}" \
         -isysroot "$sysroot" \
+        -Wl,-x \
         -install_name "@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}" \
         -compatibility_version 1 \
         -current_version "${TAGLIB_VERSION%%.*}" \
@@ -351,7 +361,7 @@ publish() {
 
     # Post-build compliance gate: the license text must have survived into
     # the published artifact.
-    [ -f "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64/${FRAMEWORK_NAME}.framework/Resources/COPYING.MPL" ] \
+    [ -f "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64/${FRAMEWORK_NAME}.framework/Resources/COPYING.MPL" ] \
         || error "Published XCFramework is missing COPYING.MPL"
 
     # Codesign the XCFramework when an identity is provided (Xcode 15+
@@ -410,7 +420,7 @@ main() {
     command -v shasum >/dev/null || error "shasum not found in PATH"
     find_cmake
 
-    log "TagLib XCFramework builder - macOS arm64, dynamic, MPL"
+    log "TagLib XCFramework builder - macOS universal (arm64 + x86_64), dynamic, MPL"
     [ "$MODE" = "--check-updates" ] && check_updates
     [ -z "$MODE" ] || error "Unknown argument '$MODE'. The build takes no version argument; edit upstream.lock to change what gets built (--check-updates to compare pins)."
     resolve_version
