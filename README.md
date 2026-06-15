@@ -10,7 +10,7 @@ platforms.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/kushalpandya/CrescendoKit", from: "1.0.0")
+    .package(url: "https://github.com/kushalpandya/CrescendoKit", from: "<latest available version>")
 ]
 ```
 
@@ -29,7 +29,7 @@ import Crescendo
 
 ## Package Artifacts
 
-Release packages include prebuilt XCFrameworks (macOS Apple Silicon for now, other platforms in future):
+Release packages include prebuilt XCFrameworks (macOS, universal for Apple Silicon and Intel; other platforms in future):
 
 | Framework               | Description                                       | License            |
 | ----------------------- | ------------------------------------------------- | ------------------ |
@@ -47,7 +47,7 @@ The [FFmpeg](https://ffmpeg.org/) and [TagLib](https://taglib.org/) artifacts ca
 using the scripts included in this project.
 
 ```bash
-./Scripts/build-ffmpeg.sh    # requires gpg (brew install gnupg)
+./Scripts/build-ffmpeg.sh    # requires nasm + gpg (brew install nasm gnupg)
 ./Scripts/build-taglib.sh    # requires cmake (brew install cmake)
 ```
 
