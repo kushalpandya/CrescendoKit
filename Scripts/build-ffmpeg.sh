@@ -54,6 +54,13 @@ LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CFFmpeg"
 MIN_MACOS="14.0"
 
+# Crescendo's C shim over FFmpeg (see its header for the design): the av_log
+# bridge (FFmpeg's log callback takes a va_list, which Swift cannot receive,
+# so the formatting lives in C) plus constants the Clang importer drops. The
+# code links into the framework dylib; the header ships as part of the
+# framework's public surface, mirroring the CTagLib shim pattern.
+SHIM_DIR="${ROOT_DIR}/Shims/FFmpeg"
+
 # Resolved by resolve_version from upstream.lock, the only source of truth
 # for what gets built. An empty hash means the pin is mid-update: the run
 # verifies and reports the hash, then stops without building.
@@ -396,6 +403,25 @@ link_framework_slice() {
     local arch="$1" prefix="$2" out="$3" sdk_path
     sdk_path="$(xcrun -sdk macosx --show-sdk-path)"
 
+    # Compile the av_log shim against this slice's installed FFmpeg headers;
+    # its object joins the link below. Hidden visibility keeps everything but
+    # the CRESCENDO_FFMPEG_API entry points out of the export list (FFmpeg's
+    # own exports are unaffected; they come from the static archives).
+    local shim_work="${BUILD_DIR}/build-shim"
+    local shim_obj="${shim_work}/crescendo_ffmpeg-${arch}.o"
+    mkdir -p "$shim_work"
+    xcrun -sdk macosx clang \
+        -c "${SHIM_DIR}/crescendo_ffmpeg.c" \
+        -o "$shim_obj" \
+        -arch "$arch" \
+        -mmacosx-version-min="${MIN_MACOS}" \
+        -isysroot "$sdk_path" \
+        -I"${prefix}/include" \
+        -O2 \
+        -fstack-protector-strong \
+        -fvisibility=hidden \
+        -D_FORTIFY_SOURCE=2
+
     xcrun -sdk macosx clang \
         -arch "$arch" \
         -mmacosx-version-min="${MIN_MACOS}" \
@@ -405,6 +431,7 @@ link_framework_slice() {
         -install_name "@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}" \
         -compatibility_version 1 \
         -current_version "${FFMPEG_VERSION%%.*}" \
+        "$shim_obj" \
         -Wl,-force_load,"${prefix}/lib/libavformat.a" \
         -Wl,-force_load,"${prefix}/lib/libavcodec.a" \
         -Wl,-force_load,"${prefix}/lib/libswresample.a" \
@@ -441,6 +468,10 @@ create_framework() {
     # little-endian 64-bit arches), so either install tree serves.
     cp -R "${arm_prefix}/include/"* "$versioned/Headers/"
 
+    # The av_log shim header ships beside FFmpeg's own headers; its quoted
+    # libavutil includes resolve against the sibling directories in place.
+    cp "${SHIM_DIR}/crescendo_ffmpeg.h" "$versioned/Headers/crescendo_ffmpeg.h"
+
     # FFmpeg headers use quoted includes that resolve relative to the file,
     # so libavformat/foo.h's `#include "libavcodec/bar.h"` doesn't resolve
     # until we help it. Two fixes:
@@ -472,9 +503,11 @@ create_framework() {
 #include "libavformat/avformat.h"
 #include "libavcodec/avcodec.h"
 #include "libavutil/avutil.h"
+#include "libavutil/log.h"
 #include "libavutil/opt.h"
 #include "libavutil/channel_layout.h"
 #include "libswresample/swresample.h"
+#include "crescendo_ffmpeg.h"
 
 #endif /* CFFMPEG_H */
 HEADER
