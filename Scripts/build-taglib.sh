@@ -233,7 +233,7 @@ build_taglib() {
         -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_MACOS}" \
         -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
         -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
-        -DCMAKE_CXX_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2" \
+        -DCMAKE_CXX_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -DTRACE_IN_RELEASE" \
         -DCMAKE_INSTALL_PREFIX="$PREFIX"
 
     run_logged "Compiling TagLib..." "$CMAKE" --build "$cmake_build" -j"$(sysctl -n hw.ncpu)"
@@ -270,6 +270,7 @@ create_framework() {
         -I"${SHIM_DIR}" \
         -I"${PREFIX}/include/taglib" \
         -DTAGLIB_STATIC \
+        -DTRACE_IN_RELEASE \
         -O2 \
         "${HARDENING_FLAGS[@]}"
 
@@ -278,8 +279,13 @@ create_framework() {
     # so the normal link pulls them all in (full format coverage).
     # -Wl,-x drops local symbols from the symbol table. TagLib is compiled with
     # hidden visibility, so its C++ symbols are already non-exported; stripping
-    # the local entries leaves only the 18 CTAGLIB_API exports and shrinks the
+    # the local entries leaves only the CTAGLIB_API exports and shrinks the
     # binary substantially (the hidden C++ names dominate the string table).
+    #
+    # -DTRACE_IN_RELEASE (both above and in the CMake flags) keeps TagLib's
+    # internal debug() diagnostics alive in the Release build so the log
+    # bridge (ctaglib_set_log_callback) has something to deliver; without it
+    # every call site compiles to a no-op under NDEBUG.
     xcrun -sdk macosx clang++ \
         -dynamiclib \
         -arch arm64 \

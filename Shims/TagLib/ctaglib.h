@@ -37,6 +37,7 @@
 #define CTAGLIB_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* Marks the symbols exported from the framework. The framework is compiled with
  * -fvisibility=hidden, so without this every C entry point would be hidden too
@@ -60,6 +61,49 @@ typedef struct ctaglib_metadata ctaglib_metadata;
  * NULL if `path` is NULL or the file cannot be opened or recognized.
  */
 CTAGLIB_API ctaglib_metadata *ctaglib_read(const char *path);
+
+/*
+ * Like `ctaglib_read`, but reads ONLY the raw tag dictionary: audio properties
+ * are not parsed, and attached pictures and the POPM rating are not copied
+ * out, so the handle never holds artwork bytes. Built for hot paths that
+ * consult a few tag keys per file (e.g. ReplayGain at every playback open),
+ * where `ctaglib_read`'s full extraction is wasted work. Equivalent to
+ * `ctaglib_read_with(path, CTAGLIB_READ_TAGS)`.
+ *
+ * The returned handle works with every accessor below: the tag accessors
+ * return the same values a full read would, and the audio-property, picture,
+ * and rating accessors return their absent sentinels (0 / -1 / NULL / empty).
+ * Release with `ctaglib_metadata_free`.
+ */
+CTAGLIB_API ctaglib_metadata *ctaglib_read_tags(const char *path);
+
+/* What `ctaglib_read_with` extracts and copies into the handle, OR-able.
+ *
+ * IMPORTANT: the options control what is EXTRACTED, not what is read from
+ * storage. Container formats interleave artwork with the tag structures
+ * (ID3v2 APIC frames live inside the tag block, FLAC PICTURE blocks are
+ * scanned with the others, MP4 `covr` sits inside `ilst`), so the parser
+ * still transfers those regions; omitting CTAGLIB_READ_PICTURES saves the
+ * copy-out and its allocations, not the underlying I/O. Omitting
+ * CTAGLIB_READ_AUDIO_PROPERTIES does skip the property parse (extra seeks
+ * on some formats).
+ */
+enum {
+    CTAGLIB_READ_AUDIO_PROPERTIES = 1 << 0, /* duration, rates, codec, lossless */
+    CTAGLIB_READ_TAGS             = 1 << 1, /* the PropertyMap dictionary */
+    CTAGLIB_READ_PICTURES         = 1 << 2, /* attached pictures */
+    CTAGLIB_READ_RATING           = 1 << 3  /* ID3v2 POPM */
+};
+
+/*
+ * Parses the audio file at `path`, extracting only the sections selected in
+ * `options` (see the enum above). Unselected sections read back through
+ * their accessors as absent sentinels (0 / -1 / NULL / empty). `options`
+ * of 0 yields an empty (but non-NULL, on a parseable file) handle.
+ * `ctaglib_read` is this with every option set. Release with
+ * `ctaglib_metadata_free`.
+ */
+CTAGLIB_API ctaglib_metadata *ctaglib_read_with(const char *path, uint32_t options);
 
 /* Releases a handle from `ctaglib_read`. Passing NULL is a no-op. */
 CTAGLIB_API void ctaglib_metadata_free(ctaglib_metadata *meta);
@@ -137,6 +181,21 @@ CTAGLIB_API const unsigned char *ctaglib_picture_data(const ctaglib_metadata *me
  */
 CTAGLIB_API const char *ctaglib_picture_mime(const ctaglib_metadata *meta, size_t i, size_t *out_len);
 
+/*
+ * The picture type of picture `i` as TagLib's canonical display string
+ * ("Front Cover", "Back Cover", "Artist", ...), normalized across container
+ * formats, as a borrowed, length-delimited UTF-8 buffer. NULL if `i` is out
+ * of range or the file recorded no type. `out_len` must not be NULL.
+ */
+CTAGLIB_API const char *ctaglib_picture_type(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/*
+ * The free-text description of picture `i` as a borrowed, length-delimited
+ * UTF-8 buffer, or NULL if `i` is out of range or the description is absent.
+ * `out_len` must not be NULL.
+ */
+CTAGLIB_API const char *ctaglib_picture_description(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
 /* ---- Rating (ID3v2 POPM) ---- */
 
 /* Nonzero if the file carries an ID3v2 POPM rating. */
@@ -148,6 +207,35 @@ CTAGLIB_API int ctaglib_has_rating(const ctaglib_metadata *meta);
  * the raw tag dictionary instead.
  */
 CTAGLIB_API int ctaglib_rating(const ctaglib_metadata *meta);
+
+/* ---- Log bridge ---- */
+
+/*
+ * Receives one TagLib diagnostic message. `message` is a borrowed,
+ * length-delimited UTF-8 buffer (no trailing newline, NOT NUL-terminated),
+ * valid only for the duration of the call; copy it to keep it. May be
+ * invoked concurrently from any thread performing a read.
+ */
+typedef void (*ctaglib_log_callback)(const char *message, size_t length);
+
+/*
+ * Routes TagLib's internal debug diagnostics ("MP4: Invalid atom size",
+ * malformed-frame notices, ...) to `callback` instead of TagLib's default
+ * stderr listener. The library is built with TRACE_IN_RELEASE so these
+ * messages exist in release builds; they fire only on anomalous input, so a
+ * clean library scan delivers nothing. Process-global, last writer wins.
+ * Passing NULL restores the default stderr listener.
+ */
+CTAGLIB_API void ctaglib_set_log_callback(ctaglib_log_callback callback);
+
+/*
+ * Emits one message through TagLib's internal debug channel, exactly as a
+ * parser diagnostic would flow. Exists so the Swift side can test its log
+ * bridge deterministically (TagLib::debug is C++ and not reachable from
+ * Swift); not used on any production path. `message` must be UTF-8 and
+ * NUL-terminated; NULL is a no-op.
+ */
+CTAGLIB_API void ctaglib_emit_debug(const char *message);
 
 #ifdef __cplusplus
 } /* extern "C" */
