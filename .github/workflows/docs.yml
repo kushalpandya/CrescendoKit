@@ -1,0 +1,197 @@
+name: Documentation
+
+# Publishes the Crescendo.doccarchive.zip attached to a release to GitHub Pages
+# at https://kushalpandya.github.io/CrescendoKit/.
+#
+# Runs on `release: published`, which fires when a draft is published and never
+# for the draft itself. This fits Crescendo's Scripts/release.sh: it creates the
+# CrescendoKit release as a draft with every asset attached and round-trip
+# verified, and never publishes or tags. So by the time this workflow runs, the
+# doccarchive is guaranteed to be attached — there is no create-then-upload race
+# to wait out. Publishing is a manual click, so the event comes from a user
+# account and does trigger this workflow; an automated publish would need a PAT,
+# as events raised with a workflow's GITHUB_TOKEN never trigger other workflows.
+#
+# The archive is built and attached by the engine's release flow, already
+# transformed for static hosting but for a root base path ("/"). Pages serves
+# this repo from the /CrescendoKit/ subpath, so the base path has to be
+# rewritten or every asset 404s.
+#
+# That rewrite is done here rather than with `docc process-archive
+# transform-for-static-hosting` (which would require a macOS runner for Xcode).
+# The two are equivalent for a pre-transformed archive: docc's transform leaves
+# data/ and index/ byte-identical and only prefixes href/src and baseUrl in the
+# index.html files. Doing it directly also keeps the renderer bundle the release
+# flow shipped, instead of swapping in whatever version the runner's Xcode has.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (defaults to the latest stable release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let an in-flight deploy finish rather than cancelling it: a cancelled Pages
+# deploy can leave the site on a half-published state.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  BASE_PATH: /CrescendoKit
+
+jobs:
+  publish:
+    # Prerelease tags must never overwrite the stable docs. The betas in this
+    # repo are not flagged as prereleases on GitHub, so the tag shape is what
+    # actually decides: a semver prerelease identifier (v1.2.0-beta.1) contains
+    # a hyphen, a stable tag (v1.2.0) does not. A manual run with an explicit
+    # tag is treated as a deliberate override and skips this check.
+    if: github.event_name == 'workflow_dispatch' || !contains(github.event.release.tag_name, '-')
+
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    steps:
+      # Only Scripts/docc-to-markdown.py is needed from the repo; the docs
+      # themselves come from the release asset. Pin to the default branch so a
+      # run always uses current tooling: on a release event the checkout would
+      # otherwise land on the tag, which for an older tag predates this script.
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve release tag
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          # Passed through the environment rather than interpolated into the
+          # script, so a tag name can never be expanded as shell code.
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          elif [ -n "${EVENT_TAG:-}" ]; then
+            tag="$EVENT_TAG"
+          else
+            # Manual run with no tag: newest release whose tag has no prerelease
+            # identifier. gh lists releases newest-first.
+            tag=$(gh release list --limit 50 --json tagName,isDraft \
+              --jq '[.[] | select(.isDraft | not) | .tagName | select(test("-") | not)][0] // ""')
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::Could not determine a release tag to publish."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing documentation for $tag"
+
+      - name: Download doccarchive from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --pattern 'Crescendo.doccarchive.zip' --dir . --clobber
+          unzip -q Crescendo.doccarchive.zip
+          test -d Crescendo.doccarchive || {
+            echo "::error::Crescendo.doccarchive.zip did not contain Crescendo.doccarchive"
+            exit 1
+          }
+          mv Crescendo.doccarchive _site
+
+      - name: Rebase asset paths onto the Pages subpath
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+
+          base = os.environ["BASE_PATH"].rstrip("/")
+          root = pathlib.Path("_site")
+
+          # The rewrite assumes the release flow already ran
+          # transform-for-static-hosting, which is what creates a per-page
+          # index.html. Without it, only the root page would work and every deep
+          # link would 404, so fail here rather than publish a broken site.
+          if not (root / "documentation" / "crescendo" / "index.html").exists():
+              sys.exit(
+                  "::error::Archive is not transformed for static hosting "
+                  "(no documentation/crescendo/index.html). The release flow must run "
+                  "`docc process-archive transform-for-static-hosting`, or this workflow "
+                  "needs to run it on a macOS runner."
+              )
+
+          count = 0
+          for page in root.rglob("index.html"):
+              html = page.read_text()
+              if f'"{base}/' in html:
+                  continue  # already rebased
+              html = html.replace('var baseUrl = "/"', f'var baseUrl = "{base}/"')
+              # Root-relative asset URLs only; leaves protocol-relative (//host) alone.
+              html = re.sub(r'(href|src)="/(?!/)', rf'\1="{base}/', html)
+              page.write_text(html)
+              count += 1
+
+          if count == 0:
+              sys.exit("::error::No index.html files were rebased; archive layout is unexpected.")
+          print(f"rebased {count} index.html files onto {base}/")
+          PY
+
+      - name: Generate Markdown mirror and llms.txt
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 Scripts/docc-to-markdown.py _site \
+            --base-path "$BASE_PATH" \
+            --version "$TAG"
+
+      - name: Write site root redirect
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # docc leaves the archive's own root index.html pointing at "/", which
+          # is wrong under a subpath. The root is only an entry point, so replace
+          # it with a redirect to the framework landing page.
+          cat > _site/index.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <title>Crescendo Documentation</title>
+          <meta http-equiv="refresh" content="0; url=${BASE_PATH}/documentation/crescendo/">
+          <link rel="canonical" href="${BASE_PATH}/documentation/crescendo/">
+          </head>
+          <body>
+          <p>Redirecting to the <a href="${BASE_PATH}/documentation/crescendo/">Crescendo documentation</a> (${TAG}).</p>
+          <p>Reading this with an AI agent? Start at <a href="${BASE_PATH}/llms.txt">llms.txt</a>, or append
+          <code>.md</code> to any documentation URL for its Markdown version.</p>
+          </body>
+          </html>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

@@ -27,6 +27,11 @@ distribution; the engine is what you use):
 import Crescendo
 ```
 
+## Documentation
+
+API documentation for the latest release is published at
+[kushalpandya.github.io/CrescendoKit](https://kushalpandya.github.io/CrescendoKit/).
+
 ## Package Artifacts
 
 Release packages include prebuilt XCFrameworks (macOS, universal for Apple Silicon and Intel; other platforms in future):
