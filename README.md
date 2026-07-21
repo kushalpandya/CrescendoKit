@@ -36,15 +36,21 @@ API documentation for the latest release is published at
 
 Release packages include prebuilt XCFrameworks (macOS, universal for Apple Silicon and Intel; other platforms in future):
 
-| Framework               | Description                                       | License            |
-| ----------------------- | ------------------------------------------------- | ------------------ |
-| `CFFmpeg.xcframework`   | FFmpeg, audio-only LGPL build, dynamically linked | LGPL 2.1+          |
-| `CTagLib.xcframework`   | TagLib + a thin C shim (source in `Shims/`)       | MPL 1.1 (elected)  |
-| `Crescendo.xcframework` | The playback engine (binary-only)                 | Proprietary (EULA) |
-| `Crescendo.doccarchive` | Public API documentation                          | Proprietary (EULA) |
+| Framework               | Description                                              | License                        |
+| ----------------------- | -------------------------------------------------------- | ------------------------------ |
+| `CFFmpeg.xcframework`   | FFmpeg, audio-only LGPL build, dynamically linked        | LGPL 2.1+                      |
+| `Crescendo.xcframework` | The playback engine with TagLib statically embedded      | Proprietary (EULA) + MPL 1.1   |
+| `Crescendo.doccarchive` | Public API documentation                                 | Proprietary (EULA)             |
 
-The product lists all four because Crescendo links `CFFmpeg` and `CTagLib` via
-`@rpath`; consumers embed all three XCFrameworks automatically.
+`Crescendo.xcframework` is a mixed-license artifact: the proprietary engine
+statically incorporates [TagLib](https://taglib.org/) (plus the thin C shim
+whose source lives in `Shims/`) under the MPL 1.1. The framework's
+`Resources/` carry `COPYING.MPL` and `TagLib-NOTICE.txt` alongside the
+Crescendo EULA, and each release attaches the exact verified TagLib source
+archive (`taglib-<version>.tar.gz`) as its corresponding source.
+
+The product lists both frameworks because Crescendo links `CFFmpeg` via
+`@rpath`; consumers embed the two XCFrameworks automatically.
 
 ## Building Dependencies
 
@@ -76,9 +82,14 @@ See [LICENSE.md](LICENSE.md) for the full map. In short:
   (`Resources/COPYING.LGPLv2.1`), and the exact source version, configure
   flags, and build script live in this repository.
 - **TagLib** is dual LGPL 2.1 / MPL 1.1; this distribution elects the
-  **MPL 1.1**. The license text ships inside the framework
-  (`Resources/COPYING.MPL`); TagLib's source is used unmodified, and the shim
-  source is published in `Shims/`.
+  **MPL 1.1** and embeds TagLib statically inside `Crescendo.xcframework`
+  (the MPL's file-level copyleft permits this in a proprietary Larger Work).
+  The license text and a notice identifying the exact version and
+  corresponding source ship inside the framework (`Resources/COPYING.MPL`,
+  `Resources/TagLib-NOTICE.txt`); TagLib's source is used unmodified, the
+  verified source archive is attached to every release, and the shim source
+  plus the build pipeline that reproduce the embedded component are published
+  in `Shims/` and `Scripts/build-taglib.sh`.
 - **Crescendo** is a proprietary binary, licensed under the
   [Crescendo EULA](LICENSES/Crescendo-EULA.txt). For uses beyond its scope,
   please get in touch.

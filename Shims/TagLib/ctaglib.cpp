@@ -1,15 +1,17 @@
 /*
  * ctaglib.cpp - Implementation of the C-API shim declared in ctaglib.h.
  *
- * Compiled by Scripts/build-taglib.sh and linked with a static libtag.a into
- * the dynamic CTagLib.framework. Parses one file into a shim-owned
+ * Compiled by Scripts/build-taglib.sh and merged with a static libtag.a into
+ * the static libCTagLib.a that the Crescendo engine folds into
+ * Crescendo.framework at archive time. Parses one file into a shim-owned
  * `ctaglib_metadata` and exposes borrowed views of the copied-out values.
  *
  * Most tags come from TagLib's unified PropertyMap (one normalized key space
  * across all container formats); audio properties, pictures, and the ID3v2
  * POPM rating need format-specific access via dynamic_cast. dynamic_cast is
- * safe here: the shim and TagLib are linked into the same dynamic library, so
- * RTTI resolves intra-library despite hidden visibility.
+ * safe here: the shim and TagLib are statically linked into the same Mach-O
+ * image (today Crescendo.framework), so RTTI always resolves intra-image
+ * despite hidden visibility.
  *
  * Every `extern "C"` entry point that touches untrusted data is wrapped in
  * try/catch: a C++ exception unwinding across the C boundary is undefined

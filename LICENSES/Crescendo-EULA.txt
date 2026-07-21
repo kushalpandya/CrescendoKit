@@ -41,12 +41,18 @@ the licenses of those components require this to be permitted.
 3. OPEN SOURCE COMPONENTS
 
 The Software dynamically links against CFFmpeg.xcframework (FFmpeg,
-licensed under the GNU Lesser General Public License v2.1 or later) and
-CTagLib.xcframework (TagLib, used under the Mozilla Public License 1.1).
-Those frameworks are separate works, are not covered by this agreement,
-and are governed solely by their own licenses, whose texts ship inside
-each framework. Nothing in this agreement limits any rights granted to
-you by those licenses.
+licensed under the GNU Lesser General Public License v2.1 or later), a
+separate work not covered by this agreement and governed solely by its
+own license, whose text ships inside that framework. The Software also
+incorporates, by static linking, the TagLib library
+(https://taglib.org), used under the Mozilla Public License 1.1.
+TagLib-covered code is not covered by this agreement and remains
+governed solely by the MPL 1.1: this agreement grants no rights over
+it, imposes no restrictions on it, and nothing in this agreement limits
+any rights granted to you by the MPL 1.1 or the LGPL. The MPL 1.1 text
+(COPYING.MPL) and a notice identifying the embedded TagLib version and
+its corresponding source (TagLib-NOTICE.txt) are embedded in the
+Software's Resources.
 
 Petrichor's own source code is licensed separately under the MIT
 License. That license covers Petrichor's source code only and does not

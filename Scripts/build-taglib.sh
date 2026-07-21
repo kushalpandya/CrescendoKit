@@ -1,31 +1,50 @@
 #!/bin/bash
 #
 # build-taglib.sh - Builds TagLib + the CTagLib C shim as a macOS universal
-# (arm64 + x86_64) dynamic XCFramework for Crescendo.
+# (arm64 + x86_64) STATIC XCFramework: the build input the Crescendo engine
+# folds into Crescendo.framework at archive time.
 #
-# Output: build/artifacts/CTagLib.xcframework  (+ .zip + .checksum)
+# Outputs (staged under build/artifacts/):
+#   CTagLib.xcframework        static libCTagLib.a + ctaglib.h + module map;
+#                              consumed only as a link input by the sibling
+#                              Crescendo engine build. Never a runtime
+#                              framework, never a release asset.
+#   taglib-dist/               the license/provenance material the engine
+#                              build and release flow embed and verify:
+#     COPYING.MPL              TagLib's MPL 1.1 text (from the verified tree)
+#     TagLib-NOTICE.txt        generated notice (version, MPL election,
+#                              corresponding source, EULA exclusion)
+#     taglib-<version>.tar.gz  the verified source tarball, kept as the MPL
+#                              corresponding-source archive (attached to each
+#                              CrescendoKit release by the release flow)
+#     taglib-static.json       binds the artifact to its exact inputs (lock
+#                              pin + shim/script/library hashes); the release
+#                              flow refuses a stale artifact via this file
 #
-# This mirrors build-ffmpeg.sh: it downloads upstream source, compiles it
-# static, and merges it into a single dynamic library inside a .framework that
-# Crescendo links via @rpath. The difference is the source - TagLib is C++, so
-# we also compile the thin `extern "C"` shim in Shims/TagLib/ctaglib.cpp and
-# link it in. The framework exports ONLY the shim's C API (everything is compiled with
-# -fvisibility=hidden; the shim functions are marked CTAGLIB_API), so TagLib's
-# C++ symbols stay private and cannot clash with a host app that links its own
-# copy of TagLib.
+# TagLib is C++, so the thin `extern "C"` shim in Shims/TagLib/ctaglib.cpp is
+# compiled alongside and merged with libtag.a into one static archive that
+# Swift imports as the `CTagLib` module. EVERYTHING in the archive, including
+# the ctaglib_* entry points, carries hidden visibility: the symbols resolve
+# when the engine links the archive, then become non-exported locals of
+# Crescendo.framework, so neither TagLib's C++ symbols nor the shim's C API
+# leak into the engine's ABI or clash with a host app's own TagLib.
 #
-# TagLib is dual LGPL 2.1 / MPL 1.1; Crescendo elects MPL. Dynamic linking plus
-# the shipped COPYING.MPL satisfy that election. CMake (brew install cmake) is
-# used to build TagLib; it is a build-time tool for this script only, never a
-# `swift build` dependency.
+# TagLib is dual LGPL 2.1 / MPL 1.1; Crescendo elects MPL 1.1, whose
+# file-level copyleft permits static linking into a proprietary Larger Work.
+# The election obligates shipping the MPL text and corresponding source with
+# the artifact, which taglib-dist/ supplies fail-closed. CMake (brew install
+# cmake) is used to build TagLib; it is a build-time tool for this script
+# only, never a `swift build` dependency.
 #
 # Supply-chain posture (fail-closed):
 #   - The version comes from upstream.lock; the downloaded tarball must match
 #     the recorded SHA-256 BEFORE extraction. TagLib publishes no release
 #     signatures, so the hash pin is the integrity anchor (recorded once,
 #     reviewed, then enforced on every build).
-#   - The MPL license text must exist in the source tree and inside the
-#     published XCFramework, or the build fails.
+#   - The archive must contain both arches, the importable CTagLib module,
+#     and no non-hidden ctaglib_*/TagLib symbols, or the build fails.
+#   - The MPL license text must exist in the source tree and in the staged
+#     taglib-dist/, or the build fails.
 #
 # Usage: ./Scripts/build-taglib.sh [--check-updates]
 #   No arg            → builds the version pinned in upstream.lock. There is
@@ -41,8 +60,6 @@
 #
 # Environment:
 #   SKIP_VERIFY=1              skips the post-build sibling `swift build`.
-#   CRESCENDO_SIGN_IDENTITY    a Developer ID Application identity; when set,
-#                              the published XCFramework is codesigned.
 
 set -euo pipefail
 
@@ -54,6 +71,7 @@ SHIM_DIR="${ROOT_DIR}/Shims/TagLib"
 LOCK_FILE="${ROOT_DIR}/upstream.lock"
 LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CTagLib"
+DIST_DIR_NAME="taglib-dist"
 MIN_MACOS="14.0"
 
 # Resolved by resolve_version from upstream.lock, the only source of truth
@@ -182,33 +200,44 @@ The bytes do not match the reviewed pin; do not build from them."
 }
 
 # Removes leftover state from prior builds so a new build cannot pick up stale
-# install trees or frameworks.
+# install trees or archives. Also clears the dirs the retired dynamic-framework
+# pipeline used, so a checkout that predates the static switch cannot leak its
+# old shape into a fresh build.
 clean_stale_state() {
     rm -rf \
         "${BUILD_DIR}/install" \
         "${BUILD_DIR}/cmake-build" \
+        "${BUILD_DIR}/static-build" \
         "${BUILD_DIR}/framework-build" \
         "${BUILD_DIR}/frameworks" \
         "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
 }
 
+# Downloads and verifies the pinned source tarball, keeping the verified
+# tarball at TARBALL: it is the MPL corresponding-source archive that
+# stage_licenses ships, not a disposable intermediate.
 download_taglib() {
     SRC_DIR="${BUILD_DIR}/taglib-${TAGLIB_VERSION}"
-    if [ -d "$SRC_DIR" ]; then
-        log "TagLib ${TAGLIB_VERSION} source already present"
-        return
+    TARBALL="${BUILD_DIR}/taglib-${TAGLIB_VERSION}.tar.gz"
+    if [ -f "$TARBALL" ]; then
+        log "TagLib ${TAGLIB_VERSION} tarball already present"
+    else
+        log "Downloading TagLib ${TAGLIB_VERSION}..."
+        mkdir -p "$BUILD_DIR"
+        # GitHub release asset: tag is v<version>, asset is
+        # taglib-<version>.tar.gz. -L follows the 302 to the presigned URL.
+        curl -fL "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" \
+             -o "$TARBALL"
     fi
-    log "Downloading TagLib ${TAGLIB_VERSION}..."
-    mkdir -p "$BUILD_DIR"
-    # GitHub release asset: tag is v<version>, asset is taglib-<version>.tar.gz.
-    # -L follows the 302 to the presigned asset URL.
-    curl -fL "https://github.com/taglib/taglib/releases/download/v${TAGLIB_VERSION}/taglib-${TAGLIB_VERSION}.tar.gz" \
-         -o "${BUILD_DIR}/taglib.tar.gz"
 
-    verify_download "${BUILD_DIR}/taglib.tar.gz"
+    verify_download "$TARBALL"
 
-    tar xf "${BUILD_DIR}/taglib.tar.gz" -C "$BUILD_DIR"
-    rm "${BUILD_DIR}/taglib.tar.gz"
+    # ALWAYS extract fresh from the verified bytes, never reuse a previously
+    # extracted tree: a local edit or interrupted experiment in the ignored
+    # source dir would otherwise be compiled while TagLib-NOTICE.txt claims
+    # unmodified upstream source and the release ships the pristine tarball.
+    rm -rf "$SRC_DIR"
+    tar xf "$TARBALL" -C "$BUILD_DIR"
     [ -d "$SRC_DIR" ] || error "Extraction did not produce ${SRC_DIR}"
 }
 
@@ -242,26 +271,26 @@ build_taglib() {
     [ -f "${PREFIX}/lib/libtag.a" ] || error "TagLib build did not produce libtag.a"
 }
 
-# Compiles the C shim and links it with libtag.a into the dynamic framework
-# binary. Only the CTAGLIB_API-marked C functions are exported.
-create_framework() {
-    local fw_root="${BUILD_DIR}/frameworks/${FRAMEWORK_NAME}.framework"
-    local versioned="$fw_root/Versions/A"
-    local work="${BUILD_DIR}/framework-build"
+# Compiles the C shim as a fat object. Two -arch flags make clang emit both
+# slices, matching the universal libtag.a it will be merged with.
+#
+# -DTRACE_IN_RELEASE (both here and in the CMake flags) keeps TagLib's
+# internal debug() diagnostics alive in the Release build so the log bridge
+# (ctaglib_set_log_callback) has something to deliver; without it every call
+# site compiles to a no-op under NDEBUG.
+compile_shim() {
+    WORK_DIR="${BUILD_DIR}/static-build"
+    rm -rf "$WORK_DIR"
+    mkdir -p "$WORK_DIR"
 
-    rm -rf "$fw_root" "$work"
-    mkdir -p "$versioned/Headers" "$versioned/Modules" "$versioned/Resources" "$work"
-
-    log "Building ${FRAMEWORK_NAME}.framework..."
+    log "Compiling the CTagLib shim..."
 
     local sysroot
     sysroot="$(xcrun -sdk macosx --show-sdk-path)"
 
-    # Compile the shim against TagLib's installed headers. Two -arch flags make
-    # clang emit a fat object, matching the universal libtag.a it links against.
     xcrun -sdk macosx clang++ \
         -c "${SHIM_DIR}/ctaglib.cpp" \
-        -o "${work}/ctaglib.o" \
+        -o "${WORK_DIR}/ctaglib.o" \
         -std=c++17 \
         -arch arm64 \
         -arch x86_64 \
@@ -273,124 +302,217 @@ create_framework() {
         -DTRACE_IN_RELEASE \
         -O2 \
         "${HARDENING_FLAGS[@]}"
+}
 
-    # Link the shim + TagLib into one dynamic library. libc++ and libz are
-    # dynamic system libraries. FileRef references every format parser directly,
-    # so the normal link pulls them all in (full format coverage).
-    # -Wl,-x drops local symbols from the symbol table. TagLib is compiled with
-    # hidden visibility, so its C++ symbols are already non-exported; stripping
-    # the local entries leaves only the CTAGLIB_API exports and shrinks the
-    # binary substantially (the hidden C++ names dominate the string table).
-    #
-    # -DTRACE_IN_RELEASE (both above and in the CMake flags) keeps TagLib's
-    # internal debug() diagnostics alive in the Release build so the log
-    # bridge (ctaglib_set_log_callback) has something to deliver; without it
-    # every call site compiles to a no-op under NDEBUG.
-    xcrun -sdk macosx clang++ \
-        -dynamiclib \
-        -arch arm64 \
-        -arch x86_64 \
-        -mmacosx-version-min="${MIN_MACOS}" \
-        -isysroot "$sysroot" \
-        -Wl,-x \
-        -install_name "@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}" \
-        -compatibility_version 1 \
-        -current_version "${TAGLIB_VERSION%%.*}" \
-        "${work}/ctaglib.o" \
-        "${PREFIX}/lib/libtag.a" \
-        -lz \
-        -o "$versioned/${FRAMEWORK_NAME}"
+# Merges the shim object and libtag.a into the single static archive the
+# engine links. FileRef references every format parser directly, so the
+# engine's normal link pulls them all in (full format coverage). Nothing here
+# is stripped or exported: every symbol is hidden-visibility, resolves when
+# the engine links the archive, and the engine's own post-dSYM `strip -x`
+# removes the local names from the shipped binary. libz stays a dynamic
+# system library; the engine adds -lz (Package.swift linkerSettings) because
+# a static archive cannot carry link flags.
+create_static_library() {
+    log "Merging shim + libtag.a into libCTagLib.a..."
+    xcrun libtool -static \
+        -o "${WORK_DIR}/libCTagLib.a" \
+        "${WORK_DIR}/ctaglib.o" \
+        "${PREFIX}/lib/libtag.a"
+}
 
-    # Public surface: only the C shim header.
-    cp "${SHIM_DIR}/ctaglib.h" "$versioned/Headers/ctaglib.h"
+# Packages the archive as a library-form XCFramework: the canonical SwiftPM
+# shape for a static binary target. SwiftPM/xcodebuild surface Headers/ (with
+# the module map) at compile time, so `internal import CTagLib` resolves, and
+# pass the .a as a link input per arch, so the engine archive folds the
+# objects into Crescendo.framework for both slices. A plain (non-framework)
+# module map because there is no framework bundle anymore.
+create_xcframework() {
+    local xcfw="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
+    local hdrs="${WORK_DIR}/Headers"
+    rm -rf "$xcfw" "$hdrs"
+    mkdir -p "$hdrs"
 
-    cat > "$versioned/Modules/module.modulemap" << MODULEMAP
-framework module ${FRAMEWORK_NAME} {
+    cp "${SHIM_DIR}/ctaglib.h" "$hdrs/ctaglib.h"
+    cat > "$hdrs/module.modulemap" << MODULEMAP
+module ${FRAMEWORK_NAME} {
     header "ctaglib.h"
     export *
 }
 MODULEMAP
 
-    cat > "$versioned/Resources/Info.plist" << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleExecutable</key><string>${FRAMEWORK_NAME}</string>
-    <key>CFBundleIdentifier</key><string>org.Crescendo.${FRAMEWORK_NAME}</string>
-    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>${FRAMEWORK_NAME}</string>
-    <key>CFBundlePackageType</key><string>FMWK</string>
-    <key>CFBundleShortVersionString</key><string>${TAGLIB_VERSION}</string>
-    <key>CFBundleVersion</key><string>${TAGLIB_VERSION}</string>
-    <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
-    <key>MinimumOSVersion</key><string>${MIN_MACOS}</string>
-</dict>
-</plist>
-PLIST
+    run_logged "Packaging static XCFramework..." xcodebuild -create-xcframework \
+        -library "${WORK_DIR}/libCTagLib.a" \
+        -headers "$hdrs" \
+        -output "$xcfw"
+}
 
-    # MPL election: ship TagLib's MPL license text alongside the binary.
+# Fail-closed checks on the packaged archive: both arches present, the shim
+# actually in it, nothing that would leak into Crescendo's exported ABI, and
+# the CTagLib module importable exactly as the engine will import it.
+verify_artifact() {
+    local slice="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64"
+    local lib="${slice}/libCTagLib.a"
+    [ -f "$lib" ] || error "Packaged XCFramework has no macos-arm64_x86_64/libCTagLib.a slice"
+
+    log "Verifying the static archive..."
+
+    local archs
+    archs="$(lipo -archs "$lib")"
+    echo "$archs" | grep -qw arm64  || error "libCTagLib.a is missing the arm64 slice (got: ${archs})"
+    echo "$archs" | grep -qw x86_64 || error "libCTagLib.a is missing the x86_64 slice (got: ${archs})"
+
+    # Symbol posture per arch: the shim must be present, and no ctaglib_* or
+    # TagLib C++ symbol may be plain-external (only `private external`, the
+    # archive-level form of hidden visibility, becomes a non-exported local
+    # when the engine links the archive). grep runs without -q: under
+    # pipefail an early -q exit SIGPIPEs nm mid-listing and fails the
+    # pipeline even on a match.
+    local arch leaks
+    for arch in arm64 x86_64; do
+        nm -arch "$arch" "$lib" 2>/dev/null | grep ' _ctaglib_read$' > /dev/null \
+            || error "libCTagLib.a (${arch}) does not define ctaglib_read; the shim is missing"
+        # Only DEFINED plain-external symbols can export; undefined externals
+        # are the shim's references into libtag.a, resolved intra-archive at
+        # the engine link, and are expected.
+        leaks="$(nm -arch "$arch" -m "$lib" 2>/dev/null \
+            | grep ' external ' | grep -v 'private external' \
+            | grep -v '(undefined)' \
+            | grep -E '_ctaglib_|N6TagLib' || true)"
+        [ -z "$leaks" ] || error "libCTagLib.a (${arch}) has default-visibility symbols that would export from Crescendo:
+${leaks}"
+    done
+    log "  Symbols: hidden (nothing would export from Crescendo)"
+
+    # Import probe: type-check a Swift snippet against the packaged headers,
+    # proving the module map + header the engine will consume actually work.
+    printf 'internal import CTagLib\nlet probe: Void = { _ = ctaglib_read }()\n' \
+        > "${WORK_DIR}/import-probe.swift"
+    xcrun swiftc -typecheck "${WORK_DIR}/import-probe.swift" \
+        -I "${slice}/Headers" >> "$LOG_FILE" 2>&1 \
+        || error "The CTagLib module does not import from the packaged headers - see ${LOG_FILE}"
+    log "  Module: imports cleanly"
+}
+
+# Stages the license and provenance material beside the artifact. SwiftPM
+# never copies resources out of a static binary target, so this directory is
+# the hand-off: the engine build embeds COPYING.MPL + TagLib-NOTICE.txt into
+# Crescendo.framework's Resources fail-closed, and the release flow attaches
+# the corresponding-source tarball and verifies taglib-static.json before
+# folding the archive into a release.
+stage_licenses() {
+    local dist="${BUILD_DIR}/${DIST_DIR_NAME}"
+    rm -rf "$dist"
+    mkdir -p "$dist"
+
+    log "Staging license + provenance material..."
+
+    # MPL election: the license text ships inside Crescendo.framework.
     # Fail-closed: an artifact without its license text is a compliance
     # regression, not a warning.
     [ -f "${SRC_DIR}/COPYING.MPL" ] \
         || error "TagLib source tree has no COPYING.MPL; refusing to build an artifact without its license text"
-    cp "${SRC_DIR}/COPYING.MPL" "$versioned/Resources/COPYING.MPL"
+    cp "${SRC_DIR}/COPYING.MPL" "$dist/COPYING.MPL"
 
-    # Standard macOS framework symlinks → Versions/Current.
-    (cd "$fw_root/Versions" && ln -sfh A Current)
-    (cd "$fw_root" \
-        && ln -sfh "Versions/Current/${FRAMEWORK_NAME}" "${FRAMEWORK_NAME}" \
-        && ln -sfh "Versions/Current/Headers"  "Headers" \
-        && ln -sfh "Versions/Current/Modules"  "Modules" \
-        && ln -sfh "Versions/Current/Resources" "Resources")
+    # The verified source tarball IS the corresponding source; keep it with
+    # the artifact so the release flow can attach it without re-downloading.
+    cp "$TARBALL" "$dist/taglib-${TAGLIB_VERSION}.tar.gz"
+
+    # The notice embedded in Crescendo.framework. Dev builds carry this
+    # generic form (the releases page); at release time the engine's
+    # release.sh replaces the CrescendoKit releases URL line below with the
+    # exact per-tag asset URL of the corresponding-source tarball before the
+    # engine is built, so shipped frameworks name their release-specific
+    # source location.
+    cat > "$dist/TagLib-NOTICE.txt" << NOTICE
+TagLib Notice for Crescendo.framework
+
+Crescendo.framework statically incorporates the TagLib audio metadata
+library, version ${TAGLIB_VERSION} (https://taglib.org).
+
+TagLib is dual-licensed under the GNU Lesser General Public License
+version 2.1 and the Mozilla Public License version 1.1 (MPL 1.1);
+Crescendo elects the MPL 1.1. The full MPL 1.1 text ships beside this
+notice as COPYING.MPL.
+
+TagLib's source code is used unmodified. (Should a future build ever
+modify TagLib-covered files, MPL 1.1 section 3.3 requires a dated
+description of the modification and availability of the modified
+source, and this notice must be updated to carry it.)
+
+Exact corresponding source for the embedded TagLib:
+  - Upstream release: https://github.com/taglib/taglib/releases/tag/v${TAGLIB_VERSION}
+  - Source archive: taglib-${TAGLIB_VERSION}.tar.gz
+      SHA-256: ${EXPECTED_SHA256}
+    A verified copy of this archive is attached as an asset to the
+    CrescendoKit release that distributes this framework:
+    https://github.com/kushalpandya/CrescendoKit/releases
+  - The CTagLib shim source and the build pipeline that reproduce the
+    embedded component live in the public CrescendoKit repository
+    (Shims/TagLib/ and Scripts/build-taglib.sh).
+
+TagLib-covered code is excluded from the Crescendo End User License
+Agreement: that agreement grants no rights over TagLib, imposes no
+restrictions on it, and nothing in it limits any rights granted to you
+by the MPL 1.1.
+NOTICE
+
+    # Bind the artifact to its exact inputs. The release flow verifies every
+    # hash here against the lock, the current shim/script sources, and the
+    # staged archive, so a stale static CTagLib can never fold into a release
+    # silently (the static replacement for the retired zip-restage rule).
+    local shim_h_sha shim_cpp_sha script_sha lib_sha
+    shim_h_sha="$(shasum -a 256 "${SHIM_DIR}/ctaglib.h" | awk '{print $1}')"
+    shim_cpp_sha="$(shasum -a 256 "${SHIM_DIR}/ctaglib.cpp" | awk '{print $1}')"
+    script_sha="$(shasum -a 256 "${SCRIPT_DIR}/build-taglib.sh" | awk '{print $1}')"
+    lib_sha="$(shasum -a 256 "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64/libCTagLib.a" | awk '{print $1}')"
+
+    cat > "$dist/taglib-static.json" << JSON
+{
+  "taglib": {
+    "version": "${TAGLIB_VERSION}",
+    "sourceSha256": "${EXPECTED_SHA256}"
+  },
+  "inputs": {
+    "ctaglib.h": "${shim_h_sha}",
+    "ctaglib.cpp": "${shim_cpp_sha}",
+    "build-taglib.sh": "${script_sha}"
+  },
+  "staticLibSha256": "${lib_sha}"
 }
+JSON
 
-create_xcframework() {
-    local fw="${BUILD_DIR}/frameworks/${FRAMEWORK_NAME}.framework"
-    local xcfw="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
-    rm -rf "$xcfw"
-
-    run_logged "Packaging XCFramework..." xcodebuild -create-xcframework \
-        -framework "$fw" \
-        -output "$xcfw"
+    # The file gates releases; prove it parses before anything trusts it.
+    python3 -c "import json, sys; json.load(open(sys.argv[1]))" "$dist/taglib-static.json" \
+        || error "Generated taglib-static.json is not valid JSON"
 }
 
 publish() {
     mkdir -p "$ARTIFACTS_DIR"
-    rm -rf "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework"
+    # Remove any prior artifact, including the retired dynamic-era outputs
+    # (the framework-form xcframework plus its zip/checksum): a stale dynamic
+    # CTagLib at this path would resurrect an @rpath load command in the
+    # engine, which its build script now rejects fail-closed.
+    rm -rf "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework" \
+           "${ARTIFACTS_DIR}/${DIST_DIR_NAME}"
     rm -f  "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework.zip" \
            "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework.checksum"
 
     log "Publishing to ${ARTIFACTS_DIR}..."
     cp -R "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework" "$ARTIFACTS_DIR/"
+    cp -R "${BUILD_DIR}/${DIST_DIR_NAME}" "$ARTIFACTS_DIR/"
 
-    # Post-build compliance gate: the license text must have survived into
-    # the published artifact.
-    [ -f "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64/${FRAMEWORK_NAME}.framework/Resources/COPYING.MPL" ] \
-        || error "Published XCFramework is missing COPYING.MPL"
+    # Post-build compliance gate: the license/notice material must have
+    # survived into the published staging area; the engine build embeds it
+    # from here fail-closed.
+    local f
+    for f in COPYING.MPL TagLib-NOTICE.txt "taglib-${TAGLIB_VERSION}.tar.gz" taglib-static.json; do
+        [ -f "${ARTIFACTS_DIR}/${DIST_DIR_NAME}/${f}" ] \
+            || error "Published ${DIST_DIR_NAME} is missing ${f}"
+    done
 
-    # Codesign the XCFramework when an identity is provided (Xcode 15+
-    # surfaces and tracks binary-dependency signatures for consumers).
-    # Unsigned remains valid: SwiftPM checksums protect the bytes, and the
-    # consumer app re-signs embedded frameworks with its own identity.
-    if [ -n "${CRESCENDO_SIGN_IDENTITY:-}" ]; then
-        log "Codesigning with: ${CRESCENDO_SIGN_IDENTITY}"
-        codesign --force --timestamp --sign "$CRESCENDO_SIGN_IDENTITY" \
-            "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework"
-    else
-        log "Artifact is unsigned (set CRESCENDO_SIGN_IDENTITY to codesign)"
-    fi
-
-    # -y preserves symlinks; SwiftPM computes the binary-target checksum against
-    # the zip, so symlinks must round-trip.
-    (cd "$ARTIFACTS_DIR" && zip -ry -q "${FRAMEWORK_NAME}.xcframework.zip" "${FRAMEWORK_NAME}.xcframework")
-
-    local checksum
-    checksum="$(swift package compute-checksum "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework.zip")"
-    echo "$checksum" > "${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework.checksum"
-
-    log "  Checksum: ${checksum}"
+    # No zip, checksum, or codesign: the archive is a link input consumed by
+    # the sibling engine build, never a release asset or runtime framework.
+    log "Prepared ${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework (static) + ${DIST_DIR_NAME}/"
 }
 
 # Exercises the new framework against the Crescendo engine source when its
@@ -408,9 +530,10 @@ verify_swift_build() {
         return
     fi
     cd "$engine_dir"
-    # Use the local CTagLib we just built; also use a local CFFmpeg if one is
-    # present so the verify does not trigger a remote fetch mid-build.
-    export CRESCENDO_LOCAL_TAGLIB=1
+    # The engine's CTagLib target always reads this repo's staged artifact
+    # (no env var; the static build input has no remote form). Use a local
+    # CFFmpeg too when one is present so the verify does not trigger a
+    # remote fetch mid-build.
     [ -d "${ARTIFACTS_DIR}/CFFmpeg.xcframework" ] && export CRESCENDO_LOCAL_FFMPEG=1
     if run_logged "Verifying with swift build (sibling Crescendo)..." swift build; then
         log "Prepared ${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework"
@@ -420,17 +543,18 @@ verify_swift_build() {
 }
 
 main() {
-    command -v xcrun  >/dev/null || error "Xcode command line tools not found"
-    command -v swift  >/dev/null || error "swift not found in PATH"
-    command -v curl   >/dev/null || error "curl not found in PATH"
-    command -v shasum >/dev/null || error "shasum not found in PATH"
+    command -v xcrun   >/dev/null || error "Xcode command line tools not found"
+    command -v swift   >/dev/null || error "swift not found in PATH"
+    command -v curl    >/dev/null || error "curl not found in PATH"
+    command -v shasum  >/dev/null || error "shasum not found in PATH"
+    command -v python3 >/dev/null || error "python3 not found in PATH"
     find_cmake
 
-    log "TagLib XCFramework builder - macOS universal (arm64 + x86_64), dynamic, MPL"
+    log "TagLib static XCFramework builder - macOS universal (arm64 + x86_64), MPL 1.1"
     [ "$MODE" = "--check-updates" ] && check_updates
     [ -z "$MODE" ] || error "Unknown argument '$MODE'. The build takes no version argument; edit upstream.lock to change what gets built (--check-updates to compare pins)."
     resolve_version
-    log "TagLib ${TAGLIB_VERSION} -> ${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework"
+    log "TagLib ${TAGLIB_VERSION} -> ${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework (static)"
 
     mkdir -p "$BUILD_DIR"
     : > "$LOG_FILE"
@@ -439,8 +563,11 @@ main() {
     clean_stale_state
     download_taglib
     build_taglib
-    create_framework
+    compile_shim
+    create_static_library
     create_xcframework
+    verify_artifact
+    stage_licenses
     publish
     verify_swift_build
 

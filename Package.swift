@@ -4,15 +4,18 @@ import PackageDescription
 
 // CrescendoKit: binary distribution of the Crescendo audio engine.
 //
-// Vends three prebuilt XCFrameworks as one product:
-//   - Crescendo  (the engine; proprietary binary, see LICENSE.md)
+// Vends two prebuilt XCFrameworks as one product:
+//   - Crescendo  (the engine; a mixed-license artifact: the proprietary
+//                 Crescendo binary with the TagLib metadata library
+//                 statically embedded under the MPL 1.1 - see LICENSE.md
+//                 and the COPYING.MPL / TagLib-NOTICE.txt inside the
+//                 framework's Resources)
 //   - CFFmpeg    (FFmpeg, LGPL 2.1+, dynamically linked and replaceable)
-//   - CTagLib    (TagLib, MPL 1.1 elected)
 //
-// The product lists all three targets because SwiftPM binary targets cannot
-// declare dependencies on each other: Crescendo.framework links the other two
-// via @rpath, and listing them together makes every consumer embed the full
-// trio automatically. Consumers `import Crescendo`.
+// The product lists both targets because SwiftPM binary targets cannot
+// declare dependencies on each other: Crescendo.framework links CFFmpeg via
+// @rpath, and listing them together makes every consumer embed the pair
+// automatically. Consumers `import Crescendo`.
 //
 // Two consumption modes per target:
 //
@@ -35,15 +38,11 @@ let crescendoChecksum = "6dab94eb177b19888d27dfb1b87d6b6372dc2df4589ce3b47977b20
 let cffmpegURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.1.1/CFFmpeg.xcframework.zip"
 let cffmpegChecksum = "c978431175efbdd124a79db21aa902b5ea1739eb4759d1dd98ab790608cbfc7a"
 
-let ctaglibURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.1.1/CTagLib.xcframework.zip"
-let ctaglibChecksum = "9ea68d071bc1a86f75164bf58fc5f10ee3c0d8b2c3cd2b5f60d36dfee4916471"
-
 let placeholderChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
 
 let useLocal = ProcessInfo.processInfo.environment["CRESCENDOKIT_LOCAL"] == "1"
     || crescendoChecksum == placeholderChecksum
     || cffmpegChecksum == placeholderChecksum
-    || ctaglibChecksum == placeholderChecksum
 
 func binaryTarget(name: String, url: String, checksum: String) -> Target {
     useLocal
@@ -57,11 +56,10 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .library(name: "Crescendo", targets: ["Crescendo", "CFFmpeg", "CTagLib"])
+        .library(name: "Crescendo", targets: ["Crescendo", "CFFmpeg"])
     ],
     targets: [
         binaryTarget(name: "Crescendo", url: crescendoURL, checksum: crescendoChecksum),
-        binaryTarget(name: "CFFmpeg", url: cffmpegURL, checksum: cffmpegChecksum),
-        binaryTarget(name: "CTagLib", url: ctaglibURL, checksum: ctaglibChecksum)
+        binaryTarget(name: "CFFmpeg", url: cffmpegURL, checksum: cffmpegChecksum)
     ]
 )

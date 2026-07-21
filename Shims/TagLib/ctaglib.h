@@ -2,11 +2,15 @@
  * ctaglib.h - C-API shim over TagLib (C++), the public surface of CTagLib.
  *
  * TagLib is C++, which Swift cannot consume directly, so this thin `extern "C"`
- * surface bridges it. CTagLib ships as a dynamic framework (Scripts/build-taglib.sh)
- * built with hidden visibility; only the functions marked CTAGLIB_API below are
- * exported, so all of TagLib's C++ symbols stay private to the framework and
- * cannot clash with a host app that links its own copy of TagLib. The Swift
- * side imports only this header (no C++ interop).
+ * surface bridges it. CTagLib is a STATIC build input (Scripts/build-taglib.sh):
+ * the shim and a static libtag.a are packaged as a static XCFramework that the
+ * Crescendo engine folds into Crescendo.framework at archive time. It is an
+ * internal implementation detail, never a runtime framework, so nothing here
+ * may become Crescendo ABI: everything, including the CTAGLIB_API entry
+ * points, carries hidden visibility and ends up non-exported in the engine
+ * binary. TagLib's C++ symbols stay private to that image and cannot clash
+ * with a host app that links its own copy of TagLib. The Swift side imports
+ * only this header (no C++ interop).
  *
  * Design: `ctaglib_read` parses a file once into an opaque, heap-allocated
  * `ctaglib_metadata` handle that OWNS copies of every value. Accessors return
@@ -39,11 +43,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Marks the symbols exported from the framework. The framework is compiled with
- * -fvisibility=hidden, so without this every C entry point would be hidden too
- * and the dynamic library would export nothing. */
+/* Marks the shim's entry points. CTagLib is statically folded into the
+ * Crescendo engine binary, and these functions are an internal implementation
+ * detail, not consumer-callable engine API - so they are deliberately HIDDEN.
+ * Hidden visibility still resolves fine at static link time within the same
+ * image (Swift's calls bind when the archive is linked in); it only prevents
+ * the symbols from being exported from the final dynamic library, which is
+ * exactly the intent. The explicit attribute also keeps the contract visible
+ * at every declaration rather than relying on -fvisibility=hidden alone. */
 #if defined(__GNUC__) || defined(__clang__)
-#define CTAGLIB_API __attribute__((visibility("default")))
+#define CTAGLIB_API __attribute__((visibility("hidden")))
 #else
 #define CTAGLIB_API
 #endif

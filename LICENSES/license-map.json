@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "description": "Machine-readable license/component map for CrescendoKit's shipped binary artifacts. The engine's Scripts/release.sh fails the release if this map drifts from the artifacts actually shipped (artifact set, embedded components, required in-framework license resources). Keep README.md and LICENSE.md prose consistent with this file.",
+  "binaryArtifacts": {
+    "Crescendo.xcframework": {
+      "license": "Proprietary (Crescendo EULA)",
+      "embeddedComponents": [
+        {
+          "name": "TagLib",
+          "license": "MPL-1.1",
+          "linkage": "static",
+          "correspondingSourceRequired": true
+        }
+      ],
+      "requiredResources": [
+        "Crescendo-EULA.txt",
+        "COPYING.MPL",
+        "TagLib-NOTICE.txt"
+      ]
+    },
+    "CFFmpeg.xcframework": {
+      "license": "LGPL-2.1-or-later",
+      "embeddedComponents": [],
+      "requiredResources": [
+        "COPYING.LGPLv2.1"
+      ]
+    }
+  }
+}
