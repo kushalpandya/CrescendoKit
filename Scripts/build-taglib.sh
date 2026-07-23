@@ -367,10 +367,15 @@ verify_artifact() {
     # when the engine links the archive). grep runs without -q: under
     # pipefail an early -q exit SIGPIPEs nm mid-listing and fails the
     # pipeline even on a match.
-    local arch leaks
+    local arch leaks symbol
     for arch in arm64 x86_64; do
-        nm -arch "$arch" "$lib" 2>/dev/null | grep ' _ctaglib_read$' > /dev/null \
-            || error "libCTagLib.a (${arch}) does not define ctaglib_read; the shim is missing"
+        # One representative symbol per shim surface (base read, options
+        # read, chapters), so a packaged archive/header mismatch in any
+        # surface fails here instead of at the engine link.
+        for symbol in _ctaglib_read _ctaglib_read_with _ctaglib_chapter_count; do
+            nm -arch "$arch" "$lib" 2>/dev/null | grep " ${symbol}\$" > /dev/null \
+                || error "libCTagLib.a (${arch}) does not define ${symbol#_}; the shim is incomplete"
+        done
         # Only DEFINED plain-external symbols can export; undefined externals
         # are the shim's references into libtag.a, resolved intra-archive at
         # the engine link, and are expected.
@@ -385,7 +390,7 @@ ${leaks}"
 
     # Import probe: type-check a Swift snippet against the packaged headers,
     # proving the module map + header the engine will consume actually work.
-    printf 'internal import CTagLib\nlet probe: Void = { _ = ctaglib_read }()\n' \
+    printf 'internal import CTagLib\nlet probe: Void = { _ = ctaglib_read; _ = ctaglib_read_with; _ = ctaglib_chapter_count; _ = ctaglib_chapter_picture_data }()\n' \
         > "${WORK_DIR}/import-probe.swift"
     xcrun swiftc -typecheck "${WORK_DIR}/import-probe.swift" \
         -I "${slice}/Headers" >> "$LOG_FILE" 2>&1 \

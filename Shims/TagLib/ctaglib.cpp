@@ -21,7 +21,9 @@
 #include "ctaglib.h"
 
 #include <atomic>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -66,6 +68,14 @@ void debug(const String &s);
 #include "id3v2tag.h"
 #include "popularimeterframe.h"
 
+// ID3v2 chapters (CHAP/CTOC) and the frame types nested inside them.
+#include "chapterframe.h"
+#include "tableofcontentsframe.h"
+#include "textidentificationframe.h"
+#include "attachedpictureframe.h"
+#include "urllinkframe.h"
+#include "tpicturetype.h"
+
 namespace {
 
 // One embedded picture: the encoded bytes plus its MIME type, TagLib's
@@ -75,6 +85,20 @@ struct Picture {
     std::string mime;
     std::string type;
     std::string description;
+};
+
+// One ID3v2 chapter (CHAP frame), as copied out of the tag: its start/end
+// in milliseconds (-1 = the frame recorded no usable value) and the bounded
+// nested values. Times are raw and unordered here; the Swift normalizer
+// owns sorting and end synthesis. (CTOC resolution reads element IDs off
+// the live frames and finishes before these are built, so no ID is kept.)
+struct Chapter {
+    int64_t startMs = -1;
+    int64_t endMs = -1;
+    std::string title;
+    std::string url;
+    bool hasPicture = false;
+    Picture picture;
 };
 
 // Converts a TagLib::String to a UTF-8 std::string.
@@ -199,6 +223,8 @@ struct ctaglib_metadata {
 
     std::vector<Picture> pictures;
 
+    std::vector<Chapter> chapters;
+
     bool hasRating = false;
     int rating = 0;
 };
@@ -218,6 +244,48 @@ constexpr size_t maxPictureCount = 8;                 // attached pictures
 // would only hand Swift bytes it is guaranteed to reject (its cap is also
 // enforced Swift-side so the protection holds against older shim builds).
 constexpr size_t maxPictureBytes = 24 * 1024 * 1024;  // bytes per picture
+// Chapter bounds, mirrored by the Swift normalizer: a crafted podcast file
+// must not copy out unbounded chapters or smuggle unbounded artwork through
+// thousands of individually plausible nested APIC frames.
+constexpr size_t maxChapterCount = 2000;                        // chapters per file
+constexpr size_t maxChapterArtworkTotal = 64 * 1024 * 1024;     // all chapter art together
+
+// Copies one picture's fields into `out` under the shared byte bound, so
+// ordinary attached pictures and nested chapter APIC frames can never
+// diverge in conversion or caps. `budget` is the caller's remaining
+// aggregate byte budget (pass a large value for the ordinary path, whose
+// aggregate is bounded by maxPictureCount instead); a picture that is
+// empty, over the per-picture cap, or over the remaining budget is refused.
+// The string fields obey the shared value-length cap (checked on the source
+// string, before conversion); an oversized one is dropped, not the picture.
+// Returns whether `out` was filled (and `budget` debited).
+bool copyPicture(const TagLib::ByteVector &data,
+                 const TagLib::String &mime,
+                 const TagLib::String &type,
+                 const TagLib::String &description,
+                 size_t &budget,
+                 Picture &out) {
+    if (data.isEmpty() || data.size() > maxPictureBytes || data.size() > budget) {
+        return false;
+    }
+    budget -= data.size();
+    out.data.assign(
+        reinterpret_cast<const unsigned char *>(data.data()),
+        reinterpret_cast<const unsigned char *>(data.data()) + data.size());
+    // The value cap is enforced on the RETAINED UTF-8 bytes as well as the
+    // source units (UTF-8 expands up to 3x the UTF-16 unit count).
+    const auto bounded = [](const TagLib::String &value) -> std::string {
+        if (value.size() > maxValueLength) {
+            return std::string();
+        }
+        std::string utf8 = toUtf8(value);
+        return utf8.size() > maxValueLength ? std::string() : utf8;
+    };
+    out.mime = bounded(mime);
+    out.type = bounded(type);
+    out.description = bounded(description);
+    return true;
+}
 
 // Copies the unified tag dictionary out of `file` into shim-owned storage,
 // bounded by the caps above. Shared by the full and tags-only reads so the
@@ -240,11 +308,244 @@ void copyProperties(TagLib::File *file, ctaglib_metadata *meta) {
             if ((*vit).size() > maxValueLength) {
                 continue;
             }
-            values.push_back(toUtf8(*vit));
+            // The cap also binds the retained UTF-8 bytes (UTF-8 expands up
+            // to 3x the source units); the Swift side enforces the same
+            // byte bound, so dropping here changes no observable value.
+            std::string utf8 = toUtf8(*vit);
+            if (utf8.size() > maxValueLength) {
+                continue;
+            }
+            values.push_back(std::move(utf8));
         }
         if (!values.empty()) {
             meta->tags.emplace_back(toUtf8(it->first), std::move(values));
         }
+    }
+}
+
+// Reads the ID3v2 chapter set (CHAP frames, ordered by a valid top-level
+// ordered CTOC when present) out of an MPEG file into shim-owned storage.
+//
+// TagLib owns every parsing concern (frame sizes, unsynchronization,
+// extended headers, encodings, nested-frame parsing, malformed frames);
+// this copies bounded values out of its concrete frame types. Limited to
+// MPEG (MP3) files - the only fixture-backed ID3v2 chapter carrier - and
+// a no-op for everything else. A malformed frame degrades to skipped or
+// partial chapter data, never a thrown exception (the caller's exception
+// boundary is the backstop).
+void extractChapters(TagLib::File *file, ctaglib_metadata *meta) {
+    auto *mpeg = dynamic_cast<TagLib::MPEG::File *>(file);
+    if (mpeg == nullptr || !mpeg->hasID3v2Tag()) {
+        return;
+    }
+    const TagLib::ID3v2::Tag *tag = mpeg->ID3v2Tag();
+    if (tag == nullptr) {
+        return;
+    }
+
+    // Valid CHAP frames in source order, capped up front: a hostile tag can
+    // hold hundreds of thousands of minimal CHAP frames, and everything
+    // below (CTOC resolution, copy-out) must stay bounded by the cap, not
+    // by the file.
+    std::vector<const TagLib::ID3v2::ChapterFrame *> source;
+    const TagLib::ID3v2::FrameList &chapFrames = tag->frameList("CHAP");
+    for (auto it = chapFrames.begin(); it != chapFrames.end(); ++it) {
+        if (source.size() >= maxChapterCount) {
+            break;
+        }
+        if (const auto *chap = dynamic_cast<const TagLib::ID3v2::ChapterFrame *>(*it)) {
+            source.push_back(chap);
+        }
+    }
+    if (source.empty()) {
+        return;
+    }
+
+    // Resolve playback order through the top-level CTOC when the tag has a
+    // valid ordered one: its child element IDs pick CHAP frames first, and
+    // valid CHAP frames it omits are appended in source order. Without one,
+    // source order stands. (Chronological sorting happens in Swift.)
+    //
+    // Resolution is via an id -> unused-source-indices map, and the child
+    // walk stops once every CHAP is matched or a bounded number of children
+    // has been inspected: a hostile CTOC can hold millions of child IDs, and
+    // a per-child linear scan of the CHAP list would otherwise turn one
+    // file into hours of CPU on an uncancellable read.
+    std::vector<const TagLib::ID3v2::ChapterFrame *> ordered;
+    std::vector<bool> used(source.size(), false);
+    const TagLib::ID3v2::TableOfContentsFrame *toc =
+        TagLib::ID3v2::TableOfContentsFrame::findTopLevel(tag);
+    if (toc != nullptr && toc->isOrdered()) {
+        // Element IDs are tiny in practice ("chp1"); an ID past this bound
+        // is skipped before OUR byte copy (the std::string below), keeping
+        // routing storage bounded at maxChapterCount x maxElementIdBytes
+        // (~0.5 MB) no matter how large a crafted tag's IDs are. The
+        // elementID()/childElements() accessors themselves are cheap:
+        // TagLib's ByteVector/List are implicitly shared, so those calls
+        // are refcount copies of data the parsed tag already holds, not
+        // fresh allocations. A skipped CHAP simply falls to the
+        // unreferenced source-order append below.
+        constexpr size_t maxElementIdBytes = 256;
+        // Reverse-filled so pop_back yields the FIRST unused CHAP with that
+        // element ID (duplicate IDs resolve in source order).
+        std::unordered_map<std::string, std::vector<size_t>> unusedById;
+        for (size_t i = source.size(); i-- > 0;) {
+            const TagLib::ByteVector id = source[i]->elementID();
+            // Empty IDs are skipped: a malformed frame's empty ByteVector
+            // may report a null data() pointer, and constructing a
+            // std::string from one is undefined even at length zero (an
+            // empty ID also cannot meaningfully match a CTOC child).
+            if (id.isEmpty() || id.size() > maxElementIdBytes) {
+                continue;
+            }
+            unusedById[std::string(id.data(), id.size())].push_back(i);
+        }
+        // (TagLib materialized the child list when it parsed the CTOC frame;
+        // the size check below only bounds OUR copies, not that parse.)
+        const TagLib::ByteVectorList children = toc->childElements();
+        const size_t maxChildInspections = maxChapterCount * 4;
+        size_t inspected = 0;
+        for (auto it = children.begin(); it != children.end(); ++it) {
+            if (ordered.size() >= source.size() || inspected >= maxChildInspections) {
+                break;
+            }
+            ++inspected;
+            // Same empty-ID guard as the map build: a null data() pointer
+            // must never reach the std::string constructor.
+            if (it->isEmpty() || it->size() > maxElementIdBytes) {
+                continue;
+            }
+            auto match = unusedById.find(std::string(it->data(), it->size()));
+            if (match == unusedById.end() || match->second.empty()) {
+                continue;
+            }
+            const size_t index = match->second.back();
+            match->second.pop_back();
+            used[index] = true;
+            ordered.push_back(source[index]);
+        }
+    }
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (!used[i]) {
+            ordered.push_back(source[i]);
+        }
+    }
+
+    // Nested frames are scanned (not just the first taken) up to this many
+    // per frame ID, so an empty or oversized first frame cannot hide a
+    // later usable one, while a hostile tag nesting thousands stays cheap.
+    constexpr size_t maxNestedFrameScan = 8;
+
+    // Converts a nested text/URL value under the shared value-length cap.
+    // Checked TWICE: on the source string (so a huge value never converts
+    // at all) and on the converted UTF-8 bytes (UTF-8 expands up to 3x the
+    // UTF-16 unit count, and the retained bound is a byte bound). An
+    // over-cap value is skipped; the chapter survives.
+    const auto boundedUtf8 = [](const TagLib::String &value) -> std::string {
+        if (value.size() > maxValueLength) {
+            return std::string();
+        }
+        std::string utf8 = toUtf8(value);
+        if (utf8.size() > maxValueLength) {
+            return std::string();
+        }
+        return utf8;
+    };
+    // The first usable nested text value of the given frame ID, or empty.
+    // The frame's individual fields are summed BEFORE toString(), which
+    // concatenates them into a fresh allocation - an over-cap frame is
+    // rejected without ever building that concatenation.
+    const auto firstUsableText = [&boundedUtf8, maxNestedFrameScan](
+        const TagLib::ID3v2::ChapterFrame *chap, const char *frameId) -> std::string {
+        const TagLib::ID3v2::FrameList &frames = chap->embeddedFrameList(frameId);
+        size_t scanned = 0;
+        for (auto it = frames.begin(); it != frames.end() && scanned < maxNestedFrameScan; ++it, ++scanned) {
+            if (const auto *text = dynamic_cast<const TagLib::ID3v2::TextIdentificationFrame *>(*it)) {
+                const TagLib::StringList fields = text->fieldList();
+                size_t totalUnits = 0;
+                for (auto fit = fields.begin(); fit != fields.end() && totalUnits <= maxValueLength; ++fit) {
+                    // toString() joins fields with a one-unit separator;
+                    // count those too, so the estimate never undershoots
+                    // the concatenation it is guarding against. The loop
+                    // bails past the cap, so the sum cannot overflow.
+                    if (fit != fields.begin()) {
+                        totalUnits += 1;
+                    }
+                    totalUnits += fit->size();
+                }
+                if (totalUnits > maxValueLength) {
+                    continue;
+                }
+                std::string value = boundedUtf8(text->toString());
+                if (!value.empty()) {
+                    return value;
+                }
+            }
+        }
+        return std::string();
+    };
+
+    size_t artworkBudget = maxChapterArtworkTotal;
+    for (const TagLib::ID3v2::ChapterFrame *chap : ordered) {
+        if (meta->chapters.size() >= maxChapterCount) {
+            break;
+        }
+        Chapter chapter;
+
+        // CHAP times are unsigned 32-bit milliseconds. 0xFFFFFFFF is the
+        // conventional "unknown" sentinel (the spec reserves it for the
+        // byte offsets, but writers emit it for times too); map it to the
+        // absent sentinel rather than surfacing a 49-day timestamp.
+        const unsigned int startMs = chap->startTime();
+        const unsigned int endMs = chap->endTime();
+        chapter.startMs = (startMs == 0xFFFFFFFFU) ? -1 : static_cast<int64_t>(startMs);
+        chapter.endMs = (endMs == 0xFFFFFFFFU) ? -1 : static_cast<int64_t>(endMs);
+
+        // Title: nested TIT2, falling back to TIT3 (subtitle).
+        for (const char *titleId : {"TIT2", "TIT3"}) {
+            chapter.title = firstUsableText(chap, titleId);
+            if (!chapter.title.empty()) {
+                break;
+            }
+        }
+
+        // Link: the first usable nested WXXX (user URL frame).
+        {
+            const TagLib::ID3v2::FrameList &links = chap->embeddedFrameList("WXXX");
+            size_t scanned = 0;
+            for (auto it = links.begin(); it != links.end() && scanned < maxNestedFrameScan; ++it, ++scanned) {
+                if (const auto *link = dynamic_cast<const TagLib::ID3v2::UserUrlLinkFrame *>(*it)) {
+                    chapter.url = boundedUtf8(link->url());
+                    if (!chapter.url.empty()) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Artwork: the first nested APIC the copy helper accepts, through
+        // the same conversion and byte bounds as ordinary attached
+        // pictures, plus the aggregate budget - a refused frame (empty,
+        // oversized, over budget) does not hide a later acceptable one.
+        {
+            const TagLib::ID3v2::FrameList &pictures = chap->embeddedFrameList("APIC");
+            size_t scanned = 0;
+            for (auto it = pictures.begin();
+                 it != pictures.end() && scanned < maxNestedFrameScan && !chapter.hasPicture;
+                 ++it, ++scanned) {
+                if (const auto *apic = dynamic_cast<const TagLib::ID3v2::AttachedPictureFrame *>(*it)) {
+                    chapter.hasPicture = copyPicture(
+                        apic->picture(),
+                        apic->mimeType(),
+                        TagLib::Utils::pictureTypeToString(apic->type()),
+                        apic->description(),
+                        artworkBudget,
+                        chapter.picture);
+                }
+            }
+        }
+
+        meta->chapters.push_back(std::move(chapter));
     }
 }
 
@@ -266,7 +567,10 @@ ctaglib_metadata *readWithOptions(const char *path, uint32_t options) {
             return nullptr;
         }
 
-        auto *meta = new ctaglib_metadata();
+        // unique_ptr so a mid-extraction throw (e.g. bad_alloc while copying
+        // hostile values) releases everything copied so far instead of
+        // leaking it through the catch below.
+        auto meta = std::make_unique<ctaglib_metadata>();
 
         if (wantProperties) {
             if (const TagLib::AudioProperties *props = ref.audioProperties()) {
@@ -279,7 +583,7 @@ ctaglib_metadata *readWithOptions(const char *path, uint32_t options) {
         }
 
         if ((options & CTAGLIB_READ_TAGS) != 0) {
-            copyProperties(file, meta);
+            copyProperties(file, meta.get());
         }
 
         // Attached pictures via the unified complex-properties API. Skip any
@@ -289,22 +593,23 @@ ctaglib_metadata *readWithOptions(const char *path, uint32_t options) {
         // out enormous or unboundedly many buffers.
         if ((options & CTAGLIB_READ_PICTURES) != 0) {
             const TagLib::List<TagLib::VariantMap> pictures = file->complexProperties("PICTURE");
+            // The ordinary path's aggregate is bounded by the count cap, so
+            // its per-call budget is effectively the per-picture cap alone.
+            size_t budget = maxPictureCount * maxPictureBytes;
             for (auto it = pictures.begin(); it != pictures.end(); ++it) {
                 if (meta->pictures.size() >= maxPictureCount) {
                     break;
                 }
                 const TagLib::VariantMap &map = *it;
-                const TagLib::ByteVector data = map.value("data").value<TagLib::ByteVector>();
-                if (data.isEmpty() || data.size() > maxPictureBytes) {
+                Picture picture;
+                if (!copyPicture(map.value("data").value<TagLib::ByteVector>(),
+                                 map.value("mimeType").value<TagLib::String>(),
+                                 map.value("pictureType").value<TagLib::String>(),
+                                 map.value("description").value<TagLib::String>(),
+                                 budget,
+                                 picture)) {
                     continue;
                 }
-                Picture picture;
-                picture.data.assign(
-                    reinterpret_cast<const unsigned char *>(data.data()),
-                    reinterpret_cast<const unsigned char *>(data.data()) + data.size());
-                picture.mime = toUtf8(map.value("mimeType").value<TagLib::String>());
-                picture.type = toUtf8(map.value("pictureType").value<TagLib::String>());
-                picture.description = toUtf8(map.value("description").value<TagLib::String>());
                 meta->pictures.push_back(std::move(picture));
             }
         }
@@ -313,7 +618,11 @@ ctaglib_metadata *readWithOptions(const char *path, uint32_t options) {
             extractRating(file, meta->hasRating, meta->rating);
         }
 
-        return meta;
+        if ((options & CTAGLIB_READ_CHAPTERS) != 0) {
+            extractChapters(file, meta.get());
+        }
+
+        return meta.release();
     } catch (...) {
         // Any parser failure on untrusted input becomes a clean NULL.
         return nullptr;
@@ -477,6 +786,105 @@ int ctaglib_has_rating(const ctaglib_metadata *meta) {
 
 int ctaglib_rating(const ctaglib_metadata *meta) {
     return meta != nullptr ? meta->rating : 0;
+}
+
+size_t ctaglib_chapter_count(const ctaglib_metadata *meta) {
+    return meta != nullptr ? meta->chapters.size() : 0;
+}
+
+int64_t ctaglib_chapter_start_ms(const ctaglib_metadata *meta, size_t i) {
+    if (meta == nullptr || i >= meta->chapters.size()) {
+        return -1;
+    }
+    return meta->chapters[i].startMs;
+}
+
+int64_t ctaglib_chapter_end_ms(const ctaglib_metadata *meta, size_t i) {
+    if (meta == nullptr || i >= meta->chapters.size()) {
+        return -1;
+    }
+    return meta->chapters[i].endMs;
+}
+
+const char *ctaglib_chapter_title(const ctaglib_metadata *meta, size_t i, size_t *out_len) {
+    if (out_len == nullptr) {
+        return nullptr;
+    }
+    if (meta == nullptr || i >= meta->chapters.size() || meta->chapters[i].title.empty()) {
+        *out_len = 0;
+        return nullptr;
+    }
+    const std::string &title = meta->chapters[i].title;
+    *out_len = title.size();
+    return title.data();
+}
+
+const char *ctaglib_chapter_url(const ctaglib_metadata *meta, size_t i, size_t *out_len) {
+    if (out_len == nullptr) {
+        return nullptr;
+    }
+    if (meta == nullptr || i >= meta->chapters.size() || meta->chapters[i].url.empty()) {
+        *out_len = 0;
+        return nullptr;
+    }
+    const std::string &url = meta->chapters[i].url;
+    *out_len = url.size();
+    return url.data();
+}
+
+const unsigned char *ctaglib_chapter_picture_data(const ctaglib_metadata *meta, size_t i, size_t *out_len) {
+    if (out_len == nullptr) {
+        return nullptr;
+    }
+    if (meta == nullptr || i >= meta->chapters.size() || !meta->chapters[i].hasPicture) {
+        *out_len = 0;
+        return nullptr;
+    }
+    const std::vector<unsigned char> &data = meta->chapters[i].picture.data;
+    *out_len = data.size();
+    return data.data();
+}
+
+const char *ctaglib_chapter_picture_mime(const ctaglib_metadata *meta, size_t i, size_t *out_len) {
+    if (out_len == nullptr) {
+        return nullptr;
+    }
+    if (meta == nullptr || i >= meta->chapters.size() || !meta->chapters[i].hasPicture ||
+        meta->chapters[i].picture.mime.empty()) {
+        *out_len = 0;
+        return nullptr;
+    }
+    const std::string &mime = meta->chapters[i].picture.mime;
+    *out_len = mime.size();
+    return mime.data();
+}
+
+const char *ctaglib_chapter_picture_type(const ctaglib_metadata *meta, size_t i, size_t *out_len) {
+    if (out_len == nullptr) {
+        return nullptr;
+    }
+    if (meta == nullptr || i >= meta->chapters.size() || !meta->chapters[i].hasPicture ||
+        meta->chapters[i].picture.type.empty()) {
+        *out_len = 0;
+        return nullptr;
+    }
+    const std::string &type = meta->chapters[i].picture.type;
+    *out_len = type.size();
+    return type.data();
+}
+
+const char *ctaglib_chapter_picture_description(const ctaglib_metadata *meta, size_t i, size_t *out_len) {
+    if (out_len == nullptr) {
+        return nullptr;
+    }
+    if (meta == nullptr || i >= meta->chapters.size() || !meta->chapters[i].hasPicture ||
+        meta->chapters[i].picture.description.empty()) {
+        *out_len = 0;
+        return nullptr;
+    }
+    const std::string &description = meta->chapters[i].picture.description;
+    *out_len = description.size();
+    return description.data();
 }
 
 } // extern "C"

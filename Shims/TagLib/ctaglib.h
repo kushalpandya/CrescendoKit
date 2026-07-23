@@ -101,7 +101,8 @@ enum {
     CTAGLIB_READ_AUDIO_PROPERTIES = 1 << 0, /* duration, rates, codec, lossless */
     CTAGLIB_READ_TAGS             = 1 << 1, /* the PropertyMap dictionary */
     CTAGLIB_READ_PICTURES         = 1 << 2, /* attached pictures */
-    CTAGLIB_READ_RATING           = 1 << 3  /* ID3v2 POPM */
+    CTAGLIB_READ_RATING           = 1 << 3, /* ID3v2 POPM */
+    CTAGLIB_READ_CHAPTERS         = 1 << 4  /* ID3v2 CHAP/CTOC (MPEG files only) */
 };
 
 /*
@@ -109,8 +110,9 @@ enum {
  * `options` (see the enum above). Unselected sections read back through
  * their accessors as absent sentinels (0 / -1 / NULL / empty). `options`
  * of 0 yields an empty (but non-NULL, on a parseable file) handle.
- * `ctaglib_read` is this with every option set. Release with
- * `ctaglib_metadata_free`.
+ * `ctaglib_read` is this with the four original sections set (chapters are
+ * a separately requested extraction, never part of a plain full read).
+ * Release with `ctaglib_metadata_free`.
  */
 CTAGLIB_API ctaglib_metadata *ctaglib_read_with(const char *path, uint32_t options);
 
@@ -204,6 +206,81 @@ CTAGLIB_API const char *ctaglib_picture_type(const ctaglib_metadata *meta, size_
  * `out_len` must not be NULL.
  */
 CTAGLIB_API const char *ctaglib_picture_description(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/* ---- Chapters (ID3v2 CHAP/CTOC) ----
+ *
+ * Extracted only under CTAGLIB_READ_CHAPTERS, and only for MPEG (MP3) files:
+ * TagLib owns the ID3v2.3/v2.4 frame parsing (sizes, unsynchronization,
+ * extended headers, encodings, nested frames, malformed-frame handling); the
+ * shim copies bounded values out. Chapter order follows the top-level ordered
+ * CTOC frame when the tag carries a valid one, with CHAP frames the CTOC
+ * omits appended in source order; without one, source order is kept. The
+ * shim does not sort by time or synthesize missing ends - the Swift
+ * normalizer owns that policy.
+ *
+ * Bounds (a podcast file is untrusted input): at most 2000 chapters per
+ * file; each copied string obeys the shim's value-length cap; each nested
+ * picture obeys the per-picture byte cap; and all chapter artwork together
+ * is capped at 64 MB. An oversized nested value or picture is skipped
+ * without dropping its otherwise valid chapter.
+ */
+
+/* The number of extracted chapters. */
+CTAGLIB_API size_t ctaglib_chapter_count(const ctaglib_metadata *meta);
+
+/*
+ * The start time of chapter `i` in milliseconds, or -1 if `i` is out of
+ * range.
+ */
+CTAGLIB_API int64_t ctaglib_chapter_start_ms(const ctaglib_metadata *meta, size_t i);
+
+/*
+ * The end time of chapter `i` in milliseconds, or -1 if `i` is out of range
+ * or the frame recorded no usable end (the 0xFFFFFFFF "unknown" sentinel
+ * some writers emit).
+ */
+CTAGLIB_API int64_t ctaglib_chapter_end_ms(const ctaglib_metadata *meta, size_t i);
+
+/*
+ * The title of chapter `i` (nested TIT2, with TIT3 as fallback) as a
+ * borrowed, length-delimited UTF-8 buffer, or NULL if `i` is out of range or
+ * the chapter carries none. `out_len` must not be NULL.
+ */
+CTAGLIB_API const char *ctaglib_chapter_title(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/*
+ * The link of chapter `i` (nested WXXX URL) as a borrowed, length-delimited
+ * UTF-8 buffer, or NULL if `i` is out of range or the chapter carries none.
+ * The value is copied as stored, not validated as a URL. `out_len` must not
+ * be NULL.
+ */
+CTAGLIB_API const char *ctaglib_chapter_url(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/*
+ * The raw encoded bytes of chapter `i`'s nested APIC picture, or NULL if `i`
+ * is out of range or the chapter carries none (including one skipped by the
+ * byte caps). Borrowed, length-delimited via `out_len` (must not be NULL).
+ */
+CTAGLIB_API const unsigned char *ctaglib_chapter_picture_data(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/*
+ * The MIME type of chapter `i`'s picture, or NULL when absent. Borrowed,
+ * length-delimited; `out_len` must not be NULL.
+ */
+CTAGLIB_API const char *ctaglib_chapter_picture_mime(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/*
+ * The picture type of chapter `i`'s picture as TagLib's canonical display
+ * string ("Front Cover", ...), matching ctaglib_picture_type exactly, or
+ * NULL when absent. Borrowed, length-delimited; `out_len` must not be NULL.
+ */
+CTAGLIB_API const char *ctaglib_chapter_picture_type(const ctaglib_metadata *meta, size_t i, size_t *out_len);
+
+/*
+ * The free-text description of chapter `i`'s picture, or NULL when absent.
+ * Borrowed, length-delimited; `out_len` must not be NULL.
+ */
+CTAGLIB_API const char *ctaglib_chapter_picture_description(const ctaglib_metadata *meta, size_t i, size_t *out_len);
 
 /* ---- Rating (ID3v2 POPM) ---- */
 
