@@ -132,6 +132,7 @@ CONFIGURE_FLAGS=(
     --enable-decoder=dst
     --enable-decoder=vorbis
     --enable-decoder=opus
+    --enable-decoder=speex
     --enable-decoder=mp1
     --enable-decoder=mp1float
     --enable-decoder=mp2
