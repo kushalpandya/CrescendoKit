@@ -32,10 +32,10 @@ import PackageDescription
 //      downloading. Until the first release populates the checksums, the
 //      placeholder values make local mode the automatic fallback.
 
-let crescendoURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.1.1/Crescendo.xcframework.zip"
-let crescendoChecksum = "6dab94eb177b19888d27dfb1b87d6b6372dc2df4589ce3b47977b20c4fc37526"
+let crescendoURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.2.0/Crescendo.xcframework.zip"
+let crescendoChecksum = "ea8720b0ccb88f6b1f220f8744cd2fba9f9601661ec4c3a07c7052a1c2971ca3"
 
-let cffmpegURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.1.1/CFFmpeg.xcframework.zip"
+let cffmpegURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.2.0/CFFmpeg.xcframework.zip"
 let cffmpegChecksum = "c978431175efbdd124a79db21aa902b5ea1739eb4759d1dd98ab790608cbfc7a"
 
 let placeholderChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
