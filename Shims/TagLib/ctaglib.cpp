@@ -62,6 +62,9 @@ void debug(const String &s);
 #include "dsfproperties.h"
 #include "dsdiffproperties.h"
 #include "asfproperties.h"
+#include "shortenproperties.h"
+#include "speexproperties.h"
+#include "matroskaproperties.h"
 
 // ID3v2 POPM rating (MP3 and other ID3v2 carriers).
 #include "mpegfile.h"
@@ -106,10 +109,66 @@ std::string toUtf8(const TagLib::String &s) {
     return s.to8Bit(true);
 }
 
+// One Matroska audio CodecID mapped to the engine's short codec name and
+// lossless flag. `prefix` ids match any CodecID starting with `id` (the
+// AAC and PCM families encode their sub-variants as suffixes).
+struct MatroskaCodec {
+    const char *id;
+    bool prefix;
+    const char *codec;
+    int lossless; // 1 = lossless, 0 = lossy, -1 = unknown
+};
+
+// The CodecIDs the shim recognizes, most specific first (exact ids before
+// the prefix families, "A_DTS/..." before "A_DTS"). Plain "A_DTS" leaves
+// losslessness unknown because the id spans the lossy core and lossless
+// DTS-HD MA; "A_WAVPACK4" likewise spans lossless and hybrid-lossy WavPack.
+constexpr MatroskaCodec matroskaCodecs[] = {
+    {"A_FLAC",         false, "flac",    1},
+    {"A_ALAC",         false, "alac",    1},
+    {"A_OPUS",         false, "opus",    0},
+    {"A_VORBIS",       false, "vorbis",  0},
+    {"A_AAC",          true,  "aac",     0},
+    {"A_MPEG/L3",      false, "mp3",     0},
+    {"A_MPEG/L2",      false, "mp2",     0},
+    {"A_MPEG/L1",      false, "mp1",     0},
+    {"A_PCM",          true,  "pcm",     1},
+    {"A_AC3",          true,  "ac3",     0},
+    {"A_EAC3",         false, "eac3",    0},
+    {"A_DTS/LOSSLESS", false, "dts",     1},
+    {"A_DTS/EXPRESS",  false, "dts",     0},
+    {"A_DTS",          false, "dts",    -1},
+    {"A_TRUEHD",       false, "truehd",  1},
+    {"A_MLP",          false, "mlp",     1},
+    {"A_TTA1",         false, "tta",     1},
+    {"A_WAVPACK4",     false, "wavpack", -1},
+};
+
+// Maps a Matroska audio CodecID (Matroska::Properties::codecName() returns
+// the raw id, e.g. "A_FLAC", "A_AAC/MPEG4/LC", "A_PCM/INT/LIT") to the
+// engine's lowercase short codec name and lossless flag via the table
+// above. An unknown id leaves `codec` empty (reported as no codec) rather
+// than guessing.
+void extractMatroskaCodec(const TagLib::Matroska::Properties *props,
+                          std::string &codec, int &lossless) {
+    const std::string id = props->codecName().to8Bit(true);
+    for (const MatroskaCodec &entry : matroskaCodecs) {
+        const bool matches = entry.prefix
+            ? id.rfind(entry.id, 0) == 0
+            : id == entry.id;
+        if (matches) {
+            codec = entry.codec;
+            lossless = entry.lossless;
+            return;
+        }
+    }
+}
+
 // Derives the codec/format name, bit depth, and lossless flag from the concrete
 // AudioProperties subclass - i.e. from the actually-decoded codec, not the file
 // extension. This is what lets us distinguish ALAC from AAC inside .m4a, WMA
-// Lossless from lossy WMA, and lossless WavPack from its hybrid-lossy mode.
+// Lossless from lossy WMA, ADTS AAC from MP3 behind MPEG::File, and lossless
+// WavPack from its hybrid-lossy mode.
 //   lossless: 1 = lossless, 0 = lossy, -1 = unknown.
 void extractFormatInfo(const TagLib::AudioProperties *props,
                        bool &hasCodec, std::string &codec, int &bitsPerSample, int &lossless) {
@@ -130,8 +189,8 @@ void extractFormatInfo(const TagLib::AudioProperties *props,
         codec = alac ? "alac" : "aac";
         bitsPerSample = p->bitsPerSample();
         lossless = alac ? 1 : 0;
-    } else if (dynamic_cast<const TagLib::MPEG::Properties *>(props) != nullptr) {
-        codec = "mp3";
+    } else if (const auto *p = dynamic_cast<const TagLib::MPEG::Properties *>(props)) {
+        codec = p->isADTS() ? "aac" : "mp3"; // ADTS AAC also parses via MPEG::File
         lossless = 0;
     } else if (dynamic_cast<const TagLib::Ogg::Vorbis::Properties *>(props) != nullptr) {
         codec = "vorbis";
@@ -173,6 +232,16 @@ void extractFormatInfo(const TagLib::AudioProperties *props,
     } else if (const auto *p = dynamic_cast<const TagLib::ASF::Properties *>(props)) {
         codec = "wma";
         lossless = (p->codec() == TagLib::ASF::Properties::WMA9Lossless) ? 1 : 0;
+    } else if (const auto *p = dynamic_cast<const TagLib::Shorten::Properties *>(props)) {
+        codec = "shorten";
+        bitsPerSample = p->bitsPerSample();
+        lossless = 1;
+    } else if (dynamic_cast<const TagLib::Ogg::Speex::Properties *>(props) != nullptr) {
+        codec = "speex";
+        lossless = 0;
+    } else if (const auto *p = dynamic_cast<const TagLib::Matroska::Properties *>(props)) {
+        extractMatroskaCodec(p, codec, lossless); // container: codec is per track
+        bitsPerSample = p->bitsPerSample();
     }
 
     hasCodec = !codec.empty();
