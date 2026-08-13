@@ -22,6 +22,13 @@ static void crescendo_ffmpeg_log_trampoline(void *avcl, int level, const char *f
     if (sink == NULL || fmt == NULL) {
         return;
     }
+    /* FFmpeg packs an optional terminal-color tint into the high bits of
+     * nonnegative levels. Match av_log_default_callback: compare, format, and
+     * forward the base AV_LOG_* severity, since Crescendo carries severity as
+     * structured data rather than terminal color. */
+    if (level >= 0) {
+        level &= 0xff;
+    }
     /* av_log invokes the callback for every message regardless of level;
      * gating against av_log_get_level here mirrors the default callback. */
     if (level > av_log_get_level()) {

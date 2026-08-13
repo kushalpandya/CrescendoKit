@@ -372,10 +372,7 @@ build_static_libs() {
 
     # -Wno-deprecated-declarations silences the upstream SecureTransport warnings
     # from tls_securetransport.c (deprecated since 10.15, but enabled on purpose
-    # to keep TLS dependency-free for LGPL). One benign -Wunused-function warning
-    # from rawdec.c remains: FFmpeg re-enables -Wall after extra-cflags, so it
-    # cannot be suppressed here without patching the upstream build. Warning flags
-    # do not affect codegen, so this does not change the produced binary.
+    # to keep TLS dependency-free for LGPL).
     run_logged "Configuring FFmpeg ${FFMPEG_VERSION} (macOS ${arch}, audio-only, LGPL)..." \
         "$src_dir/configure" \
         --prefix="$prefix" \
@@ -387,6 +384,15 @@ build_static_libs() {
         --enable-cross-compile \
         --sysroot="$sysroot" \
         "${CONFIGURE_FLAGS[@]}"
+
+    # The selective build leaves one conditionally unused raw-data helper, and
+    # Apple Clang does not recognize two upstream fallthrough spellings. FFmpeg
+    # adds -Wall and -Wimplicit-fallthrough after --extra-cflags, so append the
+    # narrow suppressions to generated build state where they take precedence.
+    # This applies only to upstream FFmpeg; the shim is compiled separately.
+    printf '%s\n' \
+        'CFLAGS += -Wno-unused-function -Wno-implicit-fallthrough' \
+        >> ffbuild/config.mak
 
     run_logged "Compiling (${arch})..." make -j"$(sysctl -n hw.ncpu)"
     run_logged "Installing (${arch})..." make install
@@ -403,6 +409,15 @@ build_static_libs() {
 link_framework_slice() {
     local arch="$1" prefix="$2" out="$3" sdk_path
     sdk_path="$(xcrun -sdk macosx --show-sdk-path)"
+
+    local linker_warning_flag=""
+    if [ "$arch" = "x86_64" ]; then
+        # NASM's Mach-O backend cannot emit LC_BUILD_VERSION, and Apple's
+        # linker has no warning-specific suppression for those assembly
+        # objects. Limit -w to this one final x86_64 link; compilation, shim
+        # warnings, and the arm64 link remain fully visible.
+        linker_warning_flag="-Wl,-w"
+    fi
 
     # Compile the av_log shim against this slice's installed FFmpeg headers;
     # its object joins the link below. Hidden visibility keeps everything but
@@ -428,6 +443,7 @@ link_framework_slice() {
         -mmacosx-version-min="${MIN_MACOS}" \
         -isysroot "$sdk_path" \
         -dynamiclib \
+        ${linker_warning_flag:+$linker_warning_flag} \
         -Wl,-x \
         -install_name "@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}" \
         -compatibility_version 1 \
