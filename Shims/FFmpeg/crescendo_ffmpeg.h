@@ -38,6 +38,11 @@
 
 #include "libavutil/avutil.h"
 #include "libavutil/error.h"
+#include "libavformat/avformat.h"
+
+#ifndef AV_CRESCENDO_DESTINATION_POLICY_API
+#error "Crescendo's FFmpeg destination-policy patch is missing"
+#endif
 
 /* Marks the symbols exported from the framework. The shim is compiled with
  * -fvisibility=hidden, so only these entry points are added to CFFmpeg's
@@ -77,6 +82,21 @@ CRESCENDO_FFMPEG_API void crescendo_ffmpeg_install_log_sink(crescendo_ffmpeg_log
 CRESCENDO_FFMPEG_API void crescendo_ffmpeg_emit_log(int level, const char *message);
 
 /*
+ * Invoked synchronously before every HTTP(S) request issued by the patched
+ * format context, including redirects and HLS child resources. Return zero to
+ * allow the request or a nonzero value to reject it. `url` is borrowed
+ * for the duration of the call. The callback and opaque pointer are not owned
+ * by FFmpeg and must outlive the format context.
+ */
+typedef int (*crescendo_ffmpeg_destination_policy)(void *opaque, const char *url);
+
+CRESCENDO_FFMPEG_API int crescendo_ffmpeg_set_destination_policy(
+    AVFormatContext *format_context,
+    crescendo_ffmpeg_destination_policy callback,
+    void *opaque
+);
+
+/*
  * FFmpeg constants the Clang importer cannot surface to Swift. AVERROR_*
  * values are the negative error codes FFmpeg calls return; compare, do not
  * negate. AV_LOG_* level macros are plain integer literals and import on
@@ -86,6 +106,7 @@ static const int32_t CRESCENDO_AVERROR_EOF                = AVERROR_EOF;
 static const int32_t CRESCENDO_AVERROR_EXIT               = AVERROR_EXIT;
 static const int32_t CRESCENDO_AVERROR_INVALIDDATA        = AVERROR_INVALIDDATA;
 static const int32_t CRESCENDO_AVERROR_PROTOCOL_NOT_FOUND = AVERROR_PROTOCOL_NOT_FOUND;
+static const int32_t CRESCENDO_AVERROR_DESTINATION_REJECTED = AVERROR(EACCES);
 
 static const int32_t CRESCENDO_AVERROR_HTTP_BAD_REQUEST       = AVERROR_HTTP_BAD_REQUEST;
 static const int32_t CRESCENDO_AVERROR_HTTP_UNAUTHORIZED      = AVERROR_HTTP_UNAUTHORIZED;

@@ -1,0 +1,268 @@
+diff --git a/libavformat/avformat.h b/libavformat/avformat.h
+index ef2b08c4f3fc2ea73712b20c4a0e391adabc6fa7..740f4d43bd71e8ef3713daf34d5b914db12205ff 100644
+--- a/libavformat/avformat.h
++++ b/libavformat/avformat.h
+@@ -1289,6 +1289,13 @@ typedef int (*av_format_control_message)(struct AVFormatContext *s, int type,
+ typedef int (*AVOpenCallback)(struct AVFormatContext *s, AVIOContext **pb, const char *url, int flags,
+                               const AVIOInterruptCB *int_cb, AVDictionary **options);
+ 
++/**
++ * Crescendo-private callback invoked before an HTTP(S) request is sent.
++ * Return 0 to allow the request or a nonzero value to reject it.
++ * The URL is borrowed and valid only for the duration of the callback.
++ */
++typedef int (*AVCrescendoDestinationPolicy)(void *opaque, const char *url);
++
+ /**
+  * The duration of a video can be estimated through various ways, and this enum can be used
+  * to know how the duration was estimated.
+@@ -1946,6 +1953,16 @@ typedef struct AVFormatContext {
+     char *name;
+ } AVFormatContext;
+ 
++/**
++ * Install Crescendo's per-context HTTP(S) destination policy.
++ * Must be called after avformat_alloc_context() and before opening input.
++ */
++int av_crescendo_set_destination_policy(AVFormatContext *s,
++                                        AVCrescendoDestinationPolicy callback,
++                                        void *opaque);
++
++#define AV_CRESCENDO_DESTINATION_POLICY_API 1
++
+ /**
+  * @defgroup lavf_core Core functions
+  * @ingroup libavf
+diff --git a/libavformat/avio.c b/libavformat/avio.c
+index 1e26092f79d121209694ce1f4c548ada0960e8f7..b40188b3e4c9cb0fb771476534484eb11ec0381d 100644
+--- a/libavformat/avio.c
++++ b/libavformat/avio.c
+@@ -365,10 +365,11 @@ int ffurl_alloc(URLContext **puc, const char *filename, int flags,
+     return AVERROR_PROTOCOL_NOT_FOUND;
+ }
+ 
+-int ffurl_open_whitelist(URLContext **puc, const char *filename, int flags,
++int ffurl_open_whitelist_with_policy(URLContext **puc, const char *filename, int flags,
+                          const AVIOInterruptCB *int_cb, AVDictionary **options,
+                          const char *whitelist, const char* blacklist,
+-                         URLContext *parent)
++                         URLContext *parent, AVCrescendoDestinationPolicy destination_policy,
++                         void *destination_policy_opaque)
+ {
+     AVDictionary *tmp_opts = NULL;
+     AVDictionaryEntry *e;
+@@ -379,6 +380,11 @@ int ffurl_open_whitelist(URLContext **puc, const char *filename, int flags,
+         ret = av_opt_copy(*puc, parent);
+         if (ret < 0)
+             goto fail;
++        (*puc)->destination_policy = parent->destination_policy;
++        (*puc)->destination_policy_opaque = parent->destination_policy_opaque;
++    } else {
++        (*puc)->destination_policy = destination_policy;
++        (*puc)->destination_policy_opaque = destination_policy_opaque;
+     }
+     if (options &&
+         (ret = av_opt_set_dict(*puc, options)) < 0)
+@@ -415,6 +421,16 @@ fail:
+     return ret;
+ }
+ 
++int ffurl_open_whitelist(URLContext **puc, const char *filename, int flags,
++                         const AVIOInterruptCB *int_cb, AVDictionary **options,
++                         const char *whitelist, const char* blacklist,
++                         URLContext *parent)
++{
++    return ffurl_open_whitelist_with_policy(puc, filename, flags, int_cb,
++                                             options, whitelist, blacklist,
++                                             parent, NULL, NULL);
++}
++
+ int ffio_fdopen(AVIOContext **sp, URLContext *h)
+ {
+     AVIOContext *s;
+@@ -474,16 +490,21 @@ int ffio_fdopen(AVIOContext **sp, URLContext *h)
+     return 0;
+ }
+ 
+-int ffio_open_whitelist(AVIOContext **s, const char *filename, int flags,
+-                        const AVIOInterruptCB *int_cb, AVDictionary **options,
+-                        const char *whitelist, const char *blacklist)
++int ffio_open_whitelist_with_policy(AVIOContext **s, const char *filename, int flags,
++                         const AVIOInterruptCB *int_cb, AVDictionary **options,
++                         const char *whitelist, const char *blacklist,
++                         AVCrescendoDestinationPolicy destination_policy,
++                         void *destination_policy_opaque)
+ {
+     URLContext *h;
+     int err;
+ 
+     *s = NULL;
+ 
+-    err = ffurl_open_whitelist(&h, filename, flags, int_cb, options, whitelist, blacklist, NULL);
++    err = ffurl_open_whitelist_with_policy(&h, filename, flags, int_cb, options,
++                                            whitelist, blacklist, NULL,
++                                            destination_policy,
++                                            destination_policy_opaque);
+     if (err < 0)
+         return err;
+     err = ffio_fdopen(s, h);
+@@ -494,6 +515,14 @@ int ffio_open_whitelist(AVIOContext **s, const char *filename, int flags,
+     return 0;
+ }
+ 
++int ffio_open_whitelist(AVIOContext **s, const char *filename, int flags,
++                         const AVIOInterruptCB *int_cb, AVDictionary **options,
++                         const char *whitelist, const char *blacklist)
++{
++    return ffio_open_whitelist_with_policy(s, filename, flags, int_cb, options,
++                                            whitelist, blacklist, NULL, NULL);
++}
++
+ int avio_open2(AVIOContext **s, const char *filename, int flags,
+                const AVIOInterruptCB *int_cb, AVDictionary **options)
+ {
+diff --git a/libavformat/avio_internal.h b/libavformat/avio_internal.h
+index fadf19dae53c31c9601fb571b48423f6df2e131f..6b8a6d53f9578a5ec45fe24735e10db87f9b222e 100644
+--- a/libavformat/avio_internal.h
++++ b/libavformat/avio_internal.h
+@@ -19,6 +19,7 @@
+ #define AVFORMAT_AVIO_INTERNAL_H
+ 
+ #include "avio.h"
++#include "avformat.h"
+ 
+ #include "libavutil/log.h"
+ 
+@@ -252,8 +252,14 @@ int ffio_copy_url_options(AVIOContext* pb, AVDictionary** avio_opts);
+ int ffio_open_null_buf(AVIOContext **s);
+ 
+ int ffio_open_whitelist(AVIOContext **s, const char *url, int flags,
+-                         const AVIOInterruptCB *int_cb, AVDictionary **options,
+-                         const char *whitelist, const char *blacklist);
++                          const AVIOInterruptCB *int_cb, AVDictionary **options,
++                          const char *whitelist, const char *blacklist);
++
++int ffio_open_whitelist_with_policy(AVIOContext **s, const char *url, int flags,
++                          const AVIOInterruptCB *int_cb, AVDictionary **options,
++                          const char *whitelist, const char *blacklist,
++                          AVCrescendoDestinationPolicy destination_policy,
++                          void *destination_policy_opaque);
+ 
+ /**
+  * Close a null buffer.
+diff --git a/libavformat/http.c b/libavformat/http.c
+index 015a150716fa37b1513f84ecf5fc623bb57fee3b..1e37f1fd63e6535c5141cd782d71189e713816ca 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -311,6 +311,13 @@ static int http_open_cnx_internal(URLContext *h, AVDictionary **options)
+ 
+     ff_url_join(buf, sizeof(buf), lower_proto, NULL, hostname, port, NULL);
+ 
++    if (h->destination_policy) {
++        if (h->destination_policy(h->destination_policy_opaque, s->location)) {
++            err = AVERROR(EACCES);
++            goto end;
++        }
++    }
++
+     if (!s->hd) {
+         s->nb_connections++;
+         err = ffurl_open_whitelist(&s->hd, buf, AVIO_FLAG_READ_WRITE,
+@@ -329,6 +337,9 @@ static int http_should_reconnect(HTTPContext *s, int err)
+     const char *status_group;
+     char http_code[4];
+ 
++    if (err == AVERROR(EACCES))
++        return 0;
++
+     switch (err) {
+     case AVERROR_HTTP_BAD_REQUEST:
+     case AVERROR_HTTP_UNAUTHORIZED:
+diff --git a/libavformat/internal.h b/libavformat/internal.h
+index a04343989be84a111a392dfd1825f33cdbddbe71..57b0234b87d2ba1365049b7e28104dae542c7ace 100644
+--- a/libavformat/internal.h
++++ b/libavformat/internal.h
+@@ -118,6 +118,9 @@ typedef struct FFFormatContext {
+     AVDictionary *id3v2_meta;
+ 
+     int missing_streams;
++
++    AVCrescendoDestinationPolicy destination_policy;
++    void *destination_policy_opaque;
+ } FFFormatContext;
+ 
+ static av_always_inline FFFormatContext *ffformatcontext(AVFormatContext *s)
+diff --git a/libavformat/options.c b/libavformat/options.c
+index 4b743bb529733d0ca487c9fbff0df933f95bf4e3..0c8257fd37b8b7c9127f6cc0a7573884b10fde24 100644
+--- a/libavformat/options.c
++++ b/libavformat/options.c
+@@ -141,6 +141,7 @@ static const AVClass av_format_context_class = {
+ static int io_open_default(AVFormatContext *s, AVIOContext **pb,
+                            const char *url, int flags, AVDictionary **options)
+ {
++    FFFormatContext *si = ffformatcontext(s);
+     int loglevel;
+ 
+     if (!strcmp(url, s->url) ||
+@@ -153,7 +154,26 @@ static int io_open_default(AVFormatContext *s, AVIOContext **pb,
+ 
+     av_log(s, loglevel, "Opening \'%s\' for %s\n", url, flags & AVIO_FLAG_WRITE ? "writing" : "reading");
+ 
+-    return ffio_open_whitelist(pb, url, flags, &s->interrupt_callback, options, s->protocol_whitelist, s->protocol_blacklist);
++    return ffio_open_whitelist_with_policy(pb, url, flags, &s->interrupt_callback,
++                                            options, s->protocol_whitelist,
++                                            s->protocol_blacklist,
++                                            si->destination_policy,
++                                            si->destination_policy_opaque);
++}
++
++int av_crescendo_set_destination_policy(AVFormatContext *s,
++                                        AVCrescendoDestinationPolicy callback,
++                                        void *opaque)
++{
++    FFFormatContext *si;
++
++    if (!s)
++        return AVERROR(EINVAL);
++
++    si = ffformatcontext(s);
++    si->destination_policy = callback;
++    si->destination_policy_opaque = opaque;
++    return 0;
+ }
+ 
+ static int io_close2_default(AVFormatContext *s, AVIOContext *pb)
+diff --git a/libavformat/url.h b/libavformat/url.h
+index 0784d77b64c6b1a8c5e9777bfbed27c3b8c832fe..72953669d687dbceb10331af321a866de448eb0d 100644
+--- a/libavformat/url.h
++++ b/libavformat/url.h
+@@ -25,6 +25,7 @@
+ #define AVFORMAT_URL_H
+ 
+ #include "avio.h"
++#include "avformat.h"
+ 
+ #include "libavutil/dict.h"
+ #include "libavutil/log.h"
+@@ -46,6 +47,8 @@ typedef struct URLContext {
+     const char *protocol_whitelist;
+     const char *protocol_blacklist;
+     int min_packet_size;        /**< if non zero, the stream is packetized with this min packet size */
++    AVCrescendoDestinationPolicy destination_policy;
++    void *destination_policy_opaque;
+ } URLContext;
+ 
+ typedef struct URLProtocol {
+@@ -145,6 +148,12 @@ int ffurl_open_whitelist(URLContext **puc, const char *filename, int flags,
+                const char *whitelist, const char* blacklist,
+                URLContext *parent);
+ 
++int ffurl_open_whitelist_with_policy(URLContext **puc, const char *filename, int flags,
++               const AVIOInterruptCB *int_cb, AVDictionary **options,
++               const char *whitelist, const char* blacklist,
++               URLContext *parent, AVCrescendoDestinationPolicy destination_policy,
++               void *destination_policy_opaque);
++
+ /**
+  * Accept an URLContext c on an URLContext s
+  *

@@ -22,6 +22,9 @@
 #   - The tarball's detached GPG signature is verified against the FFmpeg
 #     release signing key committed at Keys/ffmpeg-signing-key.asc, always -
 #     including unpinned --latest builds.
+#   - Verified release bytes are extracted into a pristine source tree. Each
+#     build copies that tree and applies only exact-version reviewed patches
+#     from Patches/FFmpeg/<version>, validated with git apply --check.
 #   - The LGPL license text must exist in the source tree and inside the
 #     published XCFramework, or the build fails.
 #
@@ -50,6 +53,9 @@ BUILD_DIR="${ROOT_DIR}/build/ffmpeg"
 ARTIFACTS_DIR="${ROOT_DIR}/build/artifacts"
 LOCK_FILE="${ROOT_DIR}/upstream.lock"
 SIGNING_KEY="${ROOT_DIR}/Keys/ffmpeg-signing-key.asc"
+PATCHES_ROOT="${ROOT_DIR}/Patches/FFmpeg"
+DOWNLOADS_DIR="${BUILD_DIR}/downloads"
+PRISTINE_ROOT="${BUILD_DIR}/pristine"
 LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CFFmpeg"
 MIN_MACOS="14.0"
@@ -67,6 +73,9 @@ SHIM_DIR="${ROOT_DIR}/Shims/FFmpeg"
 MODE="${1:-}"
 FFMPEG_VERSION=""
 EXPECTED_SHA256=""
+SRC_DIR=""
+PRISTINE_SRC_DIR=""
+PATCH_DIR=""
 
 # LGPL-only, audio-only configuration. No --enable-gpl, no --enable-nonfree.
 # Everything is disabled, then audio decoders/demuxers are enabled explicitly.
@@ -278,6 +287,9 @@ resolve_version() {
         log "FFMPEG_SHA256 is empty: pin-update mode. The tarball will be"
         log "downloaded and verified, its hash reported, and the build stopped."
     fi
+    SRC_DIR="${BUILD_DIR}/ffmpeg-${FFMPEG_VERSION}"
+    PRISTINE_SRC_DIR="${PRISTINE_ROOT}/ffmpeg-${FFMPEG_VERSION}"
+    PATCH_DIR="${PATCHES_ROOT}/${FFMPEG_VERSION}"
 }
 
 # Verifies the downloaded tarball before anything extracts it: the detached
@@ -323,6 +335,7 @@ The bytes do not match the reviewed pin; do not build from them."
 # per-arch install trees, merged dylibs, or frameworks.
 clean_stale_state() {
     rm -rf \
+        "$SRC_DIR" \
         "${BUILD_DIR}/install" \
         "${BUILD_DIR}/frameworks" \
         "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
@@ -331,23 +344,64 @@ clean_stale_state() {
 }
 
 download_ffmpeg() {
-    local src_dir="${BUILD_DIR}/ffmpeg-${FFMPEG_VERSION}"
-    if [ -d "$src_dir" ]; then
-        log "FFmpeg ${FFMPEG_VERSION} source already present (verified at download)"
+    local tarball="${DOWNLOADS_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+    local sig="${tarball}.asc"
+
+    mkdir -p "$DOWNLOADS_DIR" "$PRISTINE_ROOT"
+    if [ ! -f "$tarball" ]; then
+        log "Downloading FFmpeg ${FFMPEG_VERSION}..."
+        curl -fL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+             -o "${tarball}.download"
+        mv "${tarball}.download" "$tarball"
+    else
+        log "FFmpeg ${FFMPEG_VERSION} tarball already present"
+    fi
+    if [ ! -f "$sig" ]; then
+        curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc" \
+             -o "${sig}.download"
+        mv "${sig}.download" "$sig"
+    fi
+
+    verify_download "$tarball" "$sig"
+
+    rm -rf "$PRISTINE_SRC_DIR"
+    tar xf "$tarball" -C "$PRISTINE_ROOT"
+    [ -d "$PRISTINE_SRC_DIR" ] \
+        || error "Extraction did not produce ${PRISTINE_SRC_DIR}"
+}
+
+# Recreates disposable build source from the authenticated extraction and
+# applies only the reviewed patch set for the exact pinned version.
+prepare_source() {
+    local patches=()
+
+    rm -rf "$SRC_DIR"
+    cp -R "$PRISTINE_SRC_DIR" "$SRC_DIR"
+    [ -d "$SRC_DIR" ] || error "Failed to create disposable FFmpeg source"
+
+    if [ -d "$PATCH_DIR" ]; then
+        patches=("$PATCH_DIR"/*.patch)
+        if [ ! -f "${patches[0]}" ]; then
+            patches=()
+        fi
+    fi
+
+    if [ "${#patches[@]}" -eq 0 ]; then
+        log "No FFmpeg ${FFMPEG_VERSION} patches"
         return
     fi
-    log "Downloading FFmpeg ${FFMPEG_VERSION}..."
-    mkdir -p "$BUILD_DIR"
-    local tarball="${BUILD_DIR}/ffmpeg.tar.xz"
-    curl -fL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
-         -o "$tarball"
-    curl -fsSL "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz.asc" \
-         -o "${tarball}.asc"
 
-    verify_download "$tarball" "${tarball}.asc"
-
-    tar xf "$tarball" -C "$BUILD_DIR"
-    rm "$tarball" "${tarball}.asc"
+    # The disposable tree lives below this repository's ignored build/
+    # directory. Give it its own repository boundary so git apply cannot
+    # discover the parent worktree and silently ignore every patched path.
+    git -C "$SRC_DIR" init --quiet
+    log "Checking ${#patches[@]} FFmpeg ${FFMPEG_VERSION} patch(es)..."
+    git -C "$SRC_DIR" apply --check "${patches[@]}" \
+        || error "FFmpeg ${FFMPEG_VERSION} patches do not apply cleanly"
+    log "Applying FFmpeg ${FFMPEG_VERSION} patches..."
+    git -C "$SRC_DIR" apply "${patches[@]}" \
+        || error "Failed to apply FFmpeg ${FFMPEG_VERSION} patches"
+    rm -rf "$SRC_DIR/.git"
 }
 
 # Configures, compiles, and installs the static libs for a single arch ($1,
@@ -359,7 +413,6 @@ download_ffmpeg() {
 build_static_libs() {
     local arch="$1"
     local prefix="${BUILD_DIR}/install/macos-${arch}"
-    local src_dir="${BUILD_DIR}/ffmpeg-${FFMPEG_VERSION}"
     local work="${BUILD_DIR}/build-macos-${arch}"
 
     rm -rf "$prefix" "$work"
@@ -374,7 +427,7 @@ build_static_libs() {
     # from tls_securetransport.c (deprecated since 10.15, but enabled on purpose
     # to keep TLS dependency-free for LGPL).
     run_logged "Configuring FFmpeg ${FFMPEG_VERSION} (macOS ${arch}, audio-only, LGPL)..." \
-        "$src_dir/configure" \
+        "$SRC_DIR/configure" \
         --prefix="$prefix" \
         --target-os=darwin \
         --arch="${arch}" \
@@ -559,9 +612,9 @@ PLIST
     # LGPL distribution requirement: ship the license alongside the binary.
     # Fail-closed: an artifact without its license text is a compliance
     # regression, not a warning.
-    [ -f "${BUILD_DIR}/ffmpeg-${FFMPEG_VERSION}/COPYING.LGPLv2.1" ] \
+    [ -f "${SRC_DIR}/COPYING.LGPLv2.1" ] \
         || error "FFmpeg source tree has no COPYING.LGPLv2.1; refusing to build an artifact without its license text"
-    cp "${BUILD_DIR}/ffmpeg-${FFMPEG_VERSION}/COPYING.LGPLv2.1" \
+    cp "${SRC_DIR}/COPYING.LGPLv2.1" \
        "$versioned/Resources/COPYING.LGPLv2.1"
 
     # Standard macOS framework symlinks → Versions/Current.
@@ -651,6 +704,7 @@ main() {
     command -v gpg    >/dev/null || error "gpg not found; install it with: brew install gnupg (required to verify FFmpeg release signatures)"
     command -v shasum >/dev/null || error "shasum not found in PATH"
     command -v nasm   >/dev/null || error "nasm not found; install it with: brew install nasm (required to assemble FFmpeg's x86_64 SIMD for the universal build)"
+    command -v git    >/dev/null || error "git not found in PATH; required to validate and apply FFmpeg patches"
 
     log "FFmpeg XCFramework builder - macOS universal (arm64 + x86_64), LGPL audio-only"
     [ "$MODE" = "--check-updates" ] && check_updates
@@ -664,6 +718,7 @@ main() {
 
     clean_stale_state
     download_ffmpeg
+    prepare_source
     build_static_libs arm64
     build_static_libs x86_64
     create_framework

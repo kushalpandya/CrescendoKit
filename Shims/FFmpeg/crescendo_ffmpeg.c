@@ -62,3 +62,11 @@ void crescendo_ffmpeg_emit_log(int level, const char *message) {
     }
     av_log(NULL, level, "%s\n", message);
 }
+
+int crescendo_ffmpeg_set_destination_policy(
+    AVFormatContext *format_context,
+    crescendo_ffmpeg_destination_policy callback,
+    void *opaque
+) {
+    return av_crescendo_set_destination_policy(format_context, callback, opaque);
+}
