@@ -7,8 +7,8 @@ binary artifacts themselves.
 | What                                                         | License                                                                                                                                             |
 | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | This repository's source (scripts, `Shims/`, manifest, docs) | [MIT](LICENSES/MIT.txt)                                                                                                                             |
-| `Crescendo.xcframework`, `CrescendoLite.xcframework`, `Crescendo.doccarchive` | [Crescendo EULA](LICENSES/Crescendo-EULA.txt); embedded TagLib under MPL 1.1 (`Resources/COPYING.MPL` and `Resources/TagLib-NOTICE.txt` inside the framework) |
-| `CFFmpeg.xcframework`                                        | LGPL 2.1+ (`Resources/COPYING.LGPLv2.1` inside the framework)                                                                                       |
+| `Crescendo.xcframework`, `CrescendoLite.xcframework`, `Crescendo.doccarchive` | [Crescendo EULA](LICENSES/Crescendo-EULA.txt); embedded TagLib under MPL 1.1 (`COPYING.MPL` and `TagLib-NOTICE.txt` inside every framework slice) |
+| `CFFmpeg.xcframework`                                        | LGPL 2.1+ (`COPYING.LGPLv2.1` inside every framework slice)                                                                                       |
 
 ## The Crescendo engine
 
@@ -17,10 +17,11 @@ built without FFmpeg) are mixed-license artifacts licensed identically; what
 this section says of one applies to both. The engine itself is a
 proprietary binary: the [Crescendo EULA](LICENSES/Crescendo-EULA.txt) defines
 the narrow scope of permitted use, and a copy of it is embedded in the
-framework's `Resources/`. Use beyond that scope requires written permission.
+framework (under `Resources/` on macOS, at the bundle root of the flat iOS
+frameworks). Use beyond that scope requires written permission.
 The framework also statically incorporates TagLib under the MPL 1.1;
 TagLib-covered code is explicitly excluded from the EULA and remains governed
-solely by the MPL (see below and `Resources/TagLib-NOTICE.txt`).
+solely by the MPL (see below and the framework's `TagLib-NOTICE.txt`).
 
 ## Open source components
 

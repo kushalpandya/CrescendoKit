@@ -57,7 +57,10 @@ API documentation for the latest release is published at
 
 ## Package Artifacts
 
-Release packages include prebuilt XCFrameworks (macOS 15 or later, Apple Silicon only; other platforms in future):
+Release packages include prebuilt XCFrameworks for Apple Silicon (arm64 only): macOS 15 or later,
+iOS/iPadOS 18 or later, and the iOS Simulator. The Simulator slice has no x86_64 part, so a build
+for the generic "Any iOS Simulator Device" destination needs `ARCHS=arm64` (or
+`EXCLUDED_ARCHS=x86_64`); running on a simulator from Xcode on an Apple silicon Mac needs nothing.
 
 | Framework               | Description                                              | License                        |
 | ----------------------- | -------------------------------------------------------- | ------------------------------ |
@@ -68,9 +71,10 @@ Release packages include prebuilt XCFrameworks (macOS 15 or later, Apple Silicon
 
 `Crescendo.xcframework` is a mixed-license artifact: the proprietary engine
 statically incorporates [TagLib](https://taglib.org/) (plus the thin C shim
-whose source lives in `Shims/`) under the MPL 1.1. The framework's
-`Resources/` carry `COPYING.MPL` and `TagLib-NOTICE.txt` alongside the
-Crescendo EULA, and each release attaches the exact verified TagLib source
+whose source lives in `Shims/`) under the MPL 1.1 (`CrescendoLite.xcframework`
+the same way). Every framework slice carries `COPYING.MPL` and `TagLib-NOTICE.txt`
+alongside the Crescendo EULA (under `Resources/` on macOS, at the bundle root of the
+flat iOS frameworks), and each release attaches the exact verified TagLib source
 archive (`taglib-<version>.tar.gz`) as its corresponding source.
 
 The product lists both frameworks because Crescendo links `CFFmpeg` via
@@ -104,14 +108,14 @@ See [LICENSE.md](LICENSE.md) for the full map. In short:
 - **FFmpeg** is built LGPL-only (no GPL, no non-free components; TLS via
   Apple SecureTransport) and consumed as a dynamic framework, keeping it
   replaceable per LGPL §6. The license text ships inside the framework
-  (`Resources/COPYING.LGPLv2.1`), and the exact source version, configure
+  (`COPYING.LGPLv2.1`), and the exact source version, configure
   flags, and build script live in this repository.
 - **TagLib** is dual LGPL 2.1 / MPL 1.1; this distribution elects the
   **MPL 1.1** and embeds TagLib statically inside `Crescendo.xcframework` and `CrescendoLite.xcframework`
   (the MPL's file-level copyleft permits this in a proprietary Larger Work).
   The license text and a notice identifying the exact version and
-  corresponding source ship inside the framework (`Resources/COPYING.MPL`,
-  `Resources/TagLib-NOTICE.txt`); TagLib's source is used unmodified, the
+  corresponding source ship inside the framework (`COPYING.MPL`,
+  `TagLib-NOTICE.txt`); TagLib's source is used unmodified, the
   verified source archive is attached to every release, and the shim source
   plus the build pipeline that reproduce the embedded component are published
   in `Shims/` and `Scripts/build-taglib.sh`.

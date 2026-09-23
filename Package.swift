@@ -69,7 +69,8 @@ func binaryTarget(name: String, url: String, checksum: String) -> Target {
 let package = Package(
     name: "CrescendoKit",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v15),
+        .iOS(.v18)
     ],
     products: [
         .library(name: "Crescendo", targets: ["Crescendo", "CFFmpeg"])
