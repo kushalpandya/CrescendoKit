@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# build-taglib.sh - Builds TagLib + the CTagLib C shim as a macOS universal
-# (arm64 + x86_64) STATIC XCFramework: the build input the Crescendo engine
+# build-taglib.sh - Builds TagLib + the CTagLib C shim as a macOS (Apple
+# silicon, arm64) STATIC XCFramework: the build input the Crescendo engine
 # folds into Crescendo.framework at archive time.
 #
 # Outputs (staged under build/artifacts/):
@@ -41,7 +41,7 @@
 #     the recorded SHA-256 BEFORE extraction. TagLib publishes no release
 #     signatures, so the hash pin is the integrity anchor (recorded once,
 #     reviewed, then enforced on every build).
-#   - The archive must contain both arches, the importable CTagLib module,
+#   - The archive must be arm64-only and contain the importable CTagLib module,
 #     and no non-hidden ctaglib_*/TagLib symbols, or the build fails.
 #   - The MPL license text must exist in the source tree and in the staged
 #     taglib-dist/, or the build fails.
@@ -72,7 +72,7 @@ LOCK_FILE="${ROOT_DIR}/upstream.lock"
 LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CTagLib"
 DIST_DIR_NAME="taglib-dist"
-MIN_MACOS="14.0"
+MIN_MACOS="15.0"
 
 # Resolved by resolve_version from upstream.lock, the only source of truth
 # for what gets built. An empty hash means the pin is mid-update: the run
@@ -241,16 +241,14 @@ download_taglib() {
     [ -d "$SRC_DIR" ] || error "Extraction did not produce ${SRC_DIR}"
 }
 
-# Builds a static libtag.a (Release, universal arm64 + x86_64, hidden
-# visibility, hardened) and installs it plus the public headers under
-# build/taglib/install. CMake emits both arches in one pass via
-# CMAKE_OSX_ARCHITECTURES, so libtag.a is already a fat archive.
+# Builds a static libtag.a (Release, arm64, hidden visibility, hardened) and
+# installs it plus the public headers under build/taglib/install.
 build_taglib() {
     PREFIX="${BUILD_DIR}/install"
     local cmake_build="${BUILD_DIR}/cmake-build"
     rm -rf "$PREFIX" "$cmake_build"
 
-    run_logged "Configuring TagLib ${TAGLIB_VERSION} (cmake, static, arm64 + x86_64, hardened)..." \
+    run_logged "Configuring TagLib ${TAGLIB_VERSION} (cmake, static, arm64, hardened)..." \
         "$CMAKE" -S "$SRC_DIR" -B "$cmake_build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
@@ -258,7 +256,7 @@ build_taglib() {
         -DBUILD_BINDINGS=OFF \
         -DBUILD_TESTING=OFF \
         -DWITH_ZLIB=ON \
-        -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+        -DCMAKE_OSX_ARCHITECTURES="arm64" \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_MACOS}" \
         -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
         -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
@@ -271,8 +269,8 @@ build_taglib() {
     [ -f "${PREFIX}/lib/libtag.a" ] || error "TagLib build did not produce libtag.a"
 }
 
-# Compiles the C shim as a fat object. Two -arch flags make clang emit both
-# slices, matching the universal libtag.a it will be merged with.
+# Compiles the C shim as an arm64 object, matching the libtag.a it will be
+# merged with.
 #
 # -DTRACE_IN_RELEASE (both here and in the CMake flags) keeps TagLib's
 # internal debug() diagnostics alive in the Release build so the log bridge
@@ -293,7 +291,6 @@ compile_shim() {
         -o "${WORK_DIR}/ctaglib.o" \
         -std=c++17 \
         -arch arm64 \
-        -arch x86_64 \
         -mmacosx-version-min="${MIN_MACOS}" \
         -isysroot "$sysroot" \
         -I"${SHIM_DIR}" \
@@ -324,7 +321,7 @@ create_static_library() {
 # shape for a static binary target. SwiftPM/xcodebuild surface Headers/ (with
 # the module map) at compile time, so `internal import CTagLib` resolves, and
 # pass the .a as a link input per arch, so the engine archive folds the
-# objects into Crescendo.framework for both slices. A plain (non-framework)
+# objects into Crescendo.framework. A plain (non-framework)
 # module map because there is no framework bundle anymore.
 create_xcframework() {
     local xcfw="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
@@ -346,20 +343,19 @@ MODULEMAP
         -output "$xcfw"
 }
 
-# Fail-closed checks on the packaged archive: both arches present, the shim
+# Fail-closed checks on the packaged archive: arm64-only, the shim
 # actually in it, nothing that would leak into Crescendo's exported ABI, and
 # the CTagLib module importable exactly as the engine will import it.
 verify_artifact() {
-    local slice="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64"
+    local slice="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64"
     local lib="${slice}/libCTagLib.a"
-    [ -f "$lib" ] || error "Packaged XCFramework has no macos-arm64_x86_64/libCTagLib.a slice"
+    [ -f "$lib" ] || error "Packaged XCFramework has no macos-arm64/libCTagLib.a slice"
 
     log "Verifying the static archive..."
 
     local archs
     archs="$(lipo -archs "$lib")"
-    echo "$archs" | grep -qw arm64  || error "libCTagLib.a is missing the arm64 slice (got: ${archs})"
-    echo "$archs" | grep -qw x86_64 || error "libCTagLib.a is missing the x86_64 slice (got: ${archs})"
+    [ "$archs" = "arm64" ] || error "libCTagLib.a must be arm64-only (got: ${archs})"
 
     # Symbol posture per arch: the shim must be present, and no ctaglib_* or
     # TagLib C++ symbol may be plain-external (only `private external`, the
@@ -368,7 +364,7 @@ verify_artifact() {
     # pipefail an early -q exit SIGPIPEs nm mid-listing and fails the
     # pipeline even on a match.
     local arch leaks symbol
-    for arch in arm64 x86_64; do
+    for arch in arm64; do
         # One representative symbol per shim surface (base read, options
         # read, chapters), so a packaged archive/header mismatch in any
         # surface fails here instead of at the engine link.
@@ -469,7 +465,7 @@ NOTICE
     shim_h_sha="$(shasum -a 256 "${SHIM_DIR}/ctaglib.h" | awk '{print $1}')"
     shim_cpp_sha="$(shasum -a 256 "${SHIM_DIR}/ctaglib.cpp" | awk '{print $1}')"
     script_sha="$(shasum -a 256 "${SCRIPT_DIR}/build-taglib.sh" | awk '{print $1}')"
-    lib_sha="$(shasum -a 256 "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64_x86_64/libCTagLib.a" | awk '{print $1}')"
+    lib_sha="$(shasum -a 256 "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64/libCTagLib.a" | awk '{print $1}')"
 
     cat > "$dist/taglib-static.json" << JSON
 {
@@ -555,7 +551,7 @@ main() {
     command -v python3 >/dev/null || error "python3 not found in PATH"
     find_cmake
 
-    log "TagLib static XCFramework builder - macOS universal (arm64 + x86_64), MPL 1.1"
+    log "TagLib static XCFramework builder - macOS arm64, MPL 1.1"
     [ "$MODE" = "--check-updates" ] && check_updates
     [ -z "$MODE" ] || error "Unknown argument '$MODE'. The build takes no version argument; edit upstream.lock to change what gets built (--check-updates to compare pins)."
     resolve_version

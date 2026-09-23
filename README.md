@@ -34,7 +34,7 @@ API documentation for the latest release is published at
 
 ## Package Artifacts
 
-Release packages include prebuilt XCFrameworks (macOS, universal for Apple Silicon and Intel; other platforms in future):
+Release packages include prebuilt XCFrameworks (macOS 15 or later, Apple Silicon only; other platforms in future):
 
 | Framework               | Description                                              | License                        |
 | ----------------------- | -------------------------------------------------------- | ------------------------------ |
@@ -58,7 +58,7 @@ The [FFmpeg](https://ffmpeg.org/) and [TagLib](https://taglib.org/) artifacts ca
 using the scripts included in this project.
 
 ```bash
-./Scripts/build-ffmpeg.sh    # requires nasm + gpg (brew install nasm gnupg)
+./Scripts/build-ffmpeg.sh    # requires gpg (brew install gnupg)
 ./Scripts/build-taglib.sh    # requires cmake (brew install cmake)
 ```
 
