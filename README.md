@@ -79,7 +79,8 @@ The product lists both frameworks because Crescendo links `CFFmpeg` via
 ## Building Dependencies
 
 The [FFmpeg](https://ffmpeg.org/) and [TagLib](https://taglib.org/) artifacts can be built from source
-using the scripts included in this project.
+using the scripts included in this project. Each produces arm64 slices for macOS (15+), iOS/iPadOS
+devices, and the iOS Simulator (18+).
 
 ```bash
 ./Scripts/build-ffmpeg.sh    # requires gpg (brew install gnupg)

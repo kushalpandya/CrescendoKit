@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# build-ffmpeg.sh - Builds FFmpeg as a macOS (Apple silicon, arm64)
-# XCFramework for Crescendo.
+# build-ffmpeg.sh - Builds FFmpeg as an Apple silicon (arm64) XCFramework
+# for Crescendo, with macOS, iOS/iPadOS device, and iOS Simulator slices.
 #
 # Output: build/artifacts/CFFmpeg.xcframework  (+ .zip + .checksum)
 #
@@ -10,9 +10,11 @@
 # so no OpenSSL/GnuTLS dependency). It is built static, then merged into a
 # single dynamic library inside CFFmpeg.framework. Crescendo dynamically links
 # to that framework - that is the LGPL boundary. The pin in upstream.lock,
-# this script, and the shipped license text satisfy LGPL §6. The build is
-# arm64-only (no Intel slice). iOS / tvOS slices can be added later by
-# parameterizing build_static_libs and create_framework on SDK + min-os.
+# this script, and the shipped license text satisfy LGPL §6. Every slice is
+# arm64 (no Intel slice): macos-arm64 (macOS 15+), ios-arm64 and
+# ios-arm64-simulator (iOS/iPadOS 18+). Each slice is configured, built, and
+# linked separately against its own SDK; macOS gets the versioned framework
+# bundle, iOS the flat one.
 #
 # Supply-chain posture (fail-closed):
 #   - The version comes from upstream.lock; the downloaded tarball must match
@@ -57,6 +59,8 @@ PRISTINE_ROOT="${BUILD_DIR}/pristine"
 LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CFFmpeg"
 MIN_MACOS="15.0"
+MIN_IOS="18.0"
+SLICES=(macos-arm64 ios-arm64 ios-arm64-simulator)
 
 # Crescendo's C shim over FFmpeg (see its header for the design): the av_log
 # bridge (FFmpeg's log callback takes a va_list, which Swift cannot receive,
@@ -402,34 +406,90 @@ prepare_source() {
     rm -rf "$SRC_DIR/.git"
 }
 
-# Configures, compiles, and installs the static libs for a single arch ($1,
-# arm64) under install/macos-<arch>. --enable-cross-compile keeps configure
-# from running the compiled probes, relying on compile/link tests instead, so
-# the result does not depend on what the build host can execute.
+# Slice helpers. Every artifact slice is arm64: macOS, iOS/iPadOS devices,
+# and the iOS Simulator on Apple silicon hosts. The slice name doubles as the
+# XCFramework's library identifier.
+slice_sdk() {
+    case "$1" in
+        macos-arm64)         echo macosx ;;
+        ios-arm64)           echo iphoneos ;;
+        ios-arm64-simulator) echo iphonesimulator ;;
+        *) error "unknown slice $1" ;;
+    esac
+}
+
+# The clang target triple (arch, OS, deployment floor, environment).
+slice_target() {
+    case "$1" in
+        macos-arm64)         echo "arm64-apple-macos${MIN_MACOS}" ;;
+        ios-arm64)           echo "arm64-apple-ios${MIN_IOS}" ;;
+        ios-arm64-simulator) echo "arm64-apple-ios${MIN_IOS}-simulator" ;;
+        *) error "unknown slice $1" ;;
+    esac
+}
+
+# The deployment floor, the Info.plist platform name, and the platform name
+# vtool reports for the slice's LC_BUILD_VERSION.
+slice_min_os() { case "$1" in macos-*) echo "$MIN_MACOS" ;; *) echo "$MIN_IOS" ;; esac; }
+slice_plist_platform() {
+    case "$1" in
+        macos-arm64)         echo MacOSX ;;
+        ios-arm64)           echo iPhoneOS ;;
+        ios-arm64-simulator) echo iPhoneSimulator ;;
+    esac
+}
+slice_build_platform() {
+    case "$1" in
+        macos-arm64)         echo MACOS ;;
+        ios-arm64)           echo IOS ;;
+        ios-arm64-simulator) echo IOSSIMULATOR ;;
+    esac
+}
+
+# macOS frameworks are versioned bundles (binary and Resources under
+# Versions/A, with top-level symlinks); iOS frameworks are flat, with the
+# binary, Info.plist, and resources at the bundle root. These return the
+# directory holding each part of a slice's framework.
+slice_is_macos() { [[ "$1" == macos-* ]]; }
+framework_content_dir() { # slice, framework root
+    if slice_is_macos "$1"; then echo "$2/Versions/A"; else echo "$2"; fi
+}
+framework_resources_dir() { # slice, framework root
+    if slice_is_macos "$1"; then echo "$2/Versions/A/Resources"; else echo "$2"; fi
+}
+
+# Configures, compiles, and installs the static libs for one slice ($1) under
+# install/<slice>. --enable-cross-compile keeps configure from running the
+# compiled probes, relying on compile/link tests instead, so the result does
+# not depend on what the build host can execute (required for iOS anyway).
 build_static_libs() {
-    local arch="$1"
-    local prefix="${BUILD_DIR}/install/macos-${arch}"
-    local work="${BUILD_DIR}/build-macos-${arch}"
+    local slice="$1"
+    local prefix="${BUILD_DIR}/install/${slice}"
+    local work="${BUILD_DIR}/build-${slice}"
+    local sdk target
+
+    sdk="$(slice_sdk "$slice")"
+    target="$(slice_target "$slice")"
 
     rm -rf "$prefix" "$work"
     mkdir -p "$work"
     cd "$work"
 
     local cc sysroot
-    cc="$(xcrun -sdk macosx -find clang)"
-    sysroot="$(xcrun -sdk macosx --show-sdk-path)"
+    cc="$(xcrun -sdk "$sdk" -find clang)"
+    sysroot="$(xcrun -sdk "$sdk" --show-sdk-path)"
 
     # -Wno-deprecated-declarations silences the upstream SecureTransport warnings
     # from tls_securetransport.c (deprecated since 10.15, but enabled on purpose
     # to keep TLS dependency-free for LGPL).
-    run_logged "Configuring FFmpeg ${FFMPEG_VERSION} (macOS ${arch}, audio-only, LGPL)..." \
+    run_logged "Configuring FFmpeg ${FFMPEG_VERSION} (${slice}, audio-only, LGPL)..." \
         "$SRC_DIR/configure" \
         --prefix="$prefix" \
         --target-os=darwin \
-        --arch="${arch}" \
+        --arch=arm64 \
         --cc="$cc" \
-        --extra-cflags="-arch ${arch} -mmacosx-version-min=${MIN_MACOS} -isysroot ${sysroot} -Wno-deprecated-declarations" \
-        --extra-ldflags="-arch ${arch} -mmacosx-version-min=${MIN_MACOS}" \
+        --extra-cflags="-target ${target} -isysroot ${sysroot} -Wno-deprecated-declarations" \
+        --extra-ldflags="-target ${target} -isysroot ${sysroot}" \
         --enable-cross-compile \
         --sysroot="$sysroot" \
         "${CONFIGURE_FLAGS[@]}"
@@ -443,34 +503,40 @@ build_static_libs() {
         'CFLAGS += -Wno-unused-function -Wno-implicit-fallthrough' \
         >> ffbuild/config.mak
 
-    run_logged "Compiling (${arch})..." make -j"$(sysctl -n hw.ncpu)"
-    run_logged "Installing (${arch})..." make install
+    run_logged "Compiling (${slice})..." make -j"$(sysctl -n hw.ncpu)"
+    run_logged "Installing (${slice})..." make install
 
     cd "$ROOT_DIR"
 }
 
-# Links the four static FFmpeg libs under prefix $2 into a single-arch dynamic
-# library at $3 for arch $1. -force_load on each archive pulls in every object
-# file (FFmpeg modules register codecs/demuxers via constructor symbols that ld
+# Links the four static FFmpeg libs under prefix $2 into the dynamic library
+# at $3 for slice $1. -force_load on each archive pulls in every object file
+# (FFmpeg modules register codecs/demuxers via constructor symbols that ld
 # would otherwise strip as "unused"). -Wl,-x drops local symbols (internal
 # backtrace names) from the symbol table; exported symbols stay, so the engine
 # still links every codec it uses, just with a smaller binary.
 link_framework_slice() {
-    local arch="$1" prefix="$2" out="$3" sdk_path
-    sdk_path="$(xcrun -sdk macosx --show-sdk-path)"
+    local slice="$1" prefix="$2" out="$3" sdk target sdk_path install_name
+    sdk="$(slice_sdk "$slice")"
+    target="$(slice_target "$slice")"
+    sdk_path="$(xcrun -sdk "$sdk" --show-sdk-path)"
+    if slice_is_macos "$slice"; then
+        install_name="@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}"
+    else
+        install_name="@rpath/${FRAMEWORK_NAME}.framework/${FRAMEWORK_NAME}"
+    fi
 
     # Compile the av_log shim against this slice's installed FFmpeg headers;
     # its object joins the link below. Hidden visibility keeps everything but
     # the CRESCENDO_FFMPEG_API entry points out of the export list (FFmpeg's
     # own exports are unaffected; they come from the static archives).
     local shim_work="${BUILD_DIR}/build-shim"
-    local shim_obj="${shim_work}/crescendo_ffmpeg-${arch}.o"
+    local shim_obj="${shim_work}/crescendo_ffmpeg-${slice}.o"
     mkdir -p "$shim_work"
-    xcrun -sdk macosx clang \
+    xcrun -sdk "$sdk" clang \
         -c "${SHIM_DIR}/crescendo_ffmpeg.c" \
         -o "$shim_obj" \
-        -arch "$arch" \
-        -mmacosx-version-min="${MIN_MACOS}" \
+        -target "$target" \
         -isysroot "$sdk_path" \
         -I"${prefix}/include" \
         -O2 \
@@ -478,13 +544,12 @@ link_framework_slice() {
         -fvisibility=hidden \
         -D_FORTIFY_SOURCE=2
 
-    xcrun -sdk macosx clang \
-        -arch "$arch" \
-        -mmacosx-version-min="${MIN_MACOS}" \
+    xcrun -sdk "$sdk" clang \
+        -target "$target" \
         -isysroot "$sdk_path" \
         -dynamiclib \
         -Wl,-x \
-        -install_name "@rpath/${FRAMEWORK_NAME}.framework/Versions/A/${FRAMEWORK_NAME}" \
+        -install_name "$install_name" \
         -compatibility_version 1 \
         -current_version "${FFMPEG_VERSION%%.*}" \
         "$shim_obj" \
@@ -500,23 +565,28 @@ link_framework_slice() {
         -o "$out"
 }
 
+# Assembles CFFmpeg.framework for one slice ($1) under frameworks/<slice>/,
+# in the bundle layout its platform expects.
 create_framework() {
-    local arm_prefix="${BUILD_DIR}/install/macos-arm64"
-    local fw_root="${BUILD_DIR}/frameworks/macos-arm64/${FRAMEWORK_NAME}.framework"
-    local versioned="$fw_root/Versions/A"
+    local slice="$1"
+    local prefix="${BUILD_DIR}/install/${slice}"
+    local fw_root="${BUILD_DIR}/frameworks/${slice}/${FRAMEWORK_NAME}.framework"
+    local content resources
+    content="$(framework_content_dir "$slice" "$fw_root")"
+    resources="$(framework_resources_dir "$slice" "$fw_root")"
 
     rm -rf "$fw_root"
-    mkdir -p "$versioned/Headers" "$versioned/Modules" "$versioned/Resources"
+    mkdir -p "$content/Headers" "$content/Modules" "$resources"
 
-    log "Building ${FRAMEWORK_NAME}.framework (arm64)..."
+    log "Building ${FRAMEWORK_NAME}.framework (${slice})..."
 
-    link_framework_slice arm64 "$arm_prefix" "$versioned/${FRAMEWORK_NAME}"
+    link_framework_slice "$slice" "$prefix" "$content/${FRAMEWORK_NAME}"
 
-    cp -R "${arm_prefix}/include/"* "$versioned/Headers/"
+    cp -R "${prefix}/include/"* "$content/Headers/"
 
     # The av_log shim header ships beside FFmpeg's own headers; its quoted
     # libavutil includes resolve against the sibling directories in place.
-    cp "${SHIM_DIR}/crescendo_ffmpeg.h" "$versioned/Headers/crescendo_ffmpeg.h"
+    cp "${SHIM_DIR}/crescendo_ffmpeg.h" "$content/Headers/crescendo_ffmpeg.h"
 
     # FFmpeg headers use quoted includes that resolve relative to the file,
     # so libavformat/foo.h's `#include "libavcodec/bar.h"` doesn't resolve
@@ -531,18 +601,18 @@ create_framework() {
     #    libswresample → libavutil). No reverse links → no cycles, walks
     #    terminate at libavutil.
     for lib in libavformat libavcodec libavutil libswresample; do
-        if [ -d "$versioned/Headers/$lib" ]; then
-            find "$versioned/Headers/$lib" -name '*.h' -type f -exec sed -i '' -E \
+        if [ -d "$content/Headers/$lib" ]; then
+            find "$content/Headers/$lib" -name '*.h' -type f -exec sed -i '' -E \
                 "s|#include[[:space:]]*\"$lib/([^\"]+)\"|#include \"\\1\"|g" {} +
         fi
     done
 
-    ln -s ../libavcodec    "$versioned/Headers/libavformat/libavcodec"
-    ln -s ../libavutil     "$versioned/Headers/libavformat/libavutil"
-    ln -s ../libavutil     "$versioned/Headers/libavcodec/libavutil"
-    ln -s ../libavutil     "$versioned/Headers/libswresample/libavutil"
+    ln -s ../libavcodec    "$content/Headers/libavformat/libavcodec"
+    ln -s ../libavutil     "$content/Headers/libavformat/libavutil"
+    ln -s ../libavutil     "$content/Headers/libavcodec/libavutil"
+    ln -s ../libavutil     "$content/Headers/libswresample/libavutil"
 
-    cat > "$versioned/Headers/${FRAMEWORK_NAME}.h" << 'HEADER'
+    cat > "$content/Headers/${FRAMEWORK_NAME}.h" << 'HEADER'
 #ifndef CFFMPEG_H
 #define CFFMPEG_H
 
@@ -558,7 +628,7 @@ create_framework() {
 #endif /* CFFMPEG_H */
 HEADER
 
-    cat > "$versioned/Modules/module.modulemap" << MODULEMAP
+    cat > "$content/Modules/module.modulemap" << MODULEMAP
 framework module ${FRAMEWORK_NAME} [system] {
     umbrella header "${FRAMEWORK_NAME}.h"
     export *
@@ -566,7 +636,7 @@ framework module ${FRAMEWORK_NAME} [system] {
 }
 MODULEMAP
 
-    cat > "$versioned/Resources/Info.plist" << PLIST
+    cat > "$resources/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -579,8 +649,8 @@ MODULEMAP
     <key>CFBundlePackageType</key><string>FMWK</string>
     <key>CFBundleShortVersionString</key><string>${FFMPEG_VERSION}</string>
     <key>CFBundleVersion</key><string>${FFMPEG_VERSION}</string>
-    <key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array>
-    <key>MinimumOSVersion</key><string>${MIN_MACOS}</string>
+    <key>CFBundleSupportedPlatforms</key><array><string>$(slice_plist_platform "$slice")</string></array>
+    <key>MinimumOSVersion</key><string>$(slice_min_os "$slice")</string>
 </dict>
 </plist>
 PLIST
@@ -590,25 +660,29 @@ PLIST
     # regression, not a warning.
     [ -f "${SRC_DIR}/COPYING.LGPLv2.1" ] \
         || error "FFmpeg source tree has no COPYING.LGPLv2.1; refusing to build an artifact without its license text"
-    cp "${SRC_DIR}/COPYING.LGPLv2.1" \
-       "$versioned/Resources/COPYING.LGPLv2.1"
+    cp "${SRC_DIR}/COPYING.LGPLv2.1" "$resources/COPYING.LGPLv2.1"
 
-    # Standard macOS framework symlinks → Versions/Current.
-    (cd "$fw_root/Versions" && ln -sfh A Current)
-    (cd "$fw_root" \
-        && ln -sfh "Versions/Current/${FRAMEWORK_NAME}" "${FRAMEWORK_NAME}" \
-        && ln -sfh "Versions/Current/Headers"  "Headers" \
-        && ln -sfh "Versions/Current/Modules"  "Modules" \
-        && ln -sfh "Versions/Current/Resources" "Resources")
+    if slice_is_macos "$slice"; then
+        # Standard macOS framework symlinks → Versions/Current.
+        (cd "$fw_root/Versions" && ln -sfh A Current)
+        (cd "$fw_root" \
+            && ln -sfh "Versions/Current/${FRAMEWORK_NAME}" "${FRAMEWORK_NAME}" \
+            && ln -sfh "Versions/Current/Headers"  "Headers" \
+            && ln -sfh "Versions/Current/Modules"  "Modules" \
+            && ln -sfh "Versions/Current/Resources" "Resources")
+    fi
 }
 
 create_xcframework() {
-    local fw="${BUILD_DIR}/frameworks/macos-arm64/${FRAMEWORK_NAME}.framework"
     local xcfw="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
+    local args=() slice
     rm -rf "$xcfw"
+    for slice in "${SLICES[@]}"; do
+        args+=(-framework "${BUILD_DIR}/frameworks/${slice}/${FRAMEWORK_NAME}.framework")
+    done
 
-    run_logged "Packaging XCFramework..." xcodebuild -create-xcframework \
-        -framework "$fw" \
+    run_logged "Packaging XCFramework (${SLICES[*]})..." xcodebuild -create-xcframework \
+        "${args[@]}" \
         -output "$xcfw"
 }
 
@@ -621,18 +695,24 @@ publish() {
     log "Publishing to ${ARTIFACTS_DIR}..."
     cp -R "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework" "$ARTIFACTS_DIR/"
 
-    # Post-build compliance gate: the license text must have survived into
-    # the published artifact.
-    local published_fw="${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64/${FRAMEWORK_NAME}.framework"
-    [ -f "${published_fw}/Resources/COPYING.LGPLv2.1" ] \
-        || error "Published XCFramework is missing COPYING.LGPLv2.1"
-
-    # Arch gate: the artifact is arm64-only, and an Intel slice must never
-    # slip back in unnoticed.
-    local archs
-    archs="$(lipo -archs "${published_fw}/${FRAMEWORK_NAME}")"
-    [ "$archs" = "arm64" ] \
-        || error "Published ${FRAMEWORK_NAME} binary must be arm64-only (got: ${archs})"
+    # Post-build gates, per slice: the license text survived into the
+    # published artifact, the binary is arm64-only (an Intel slice must never
+    # slip back in), and it targets the right platform at the right floor.
+    local slice published_fw binary archs build platform minos
+    for slice in "${SLICES[@]}"; do
+        published_fw="${ARTIFACTS_DIR}/${FRAMEWORK_NAME}.xcframework/${slice}/${FRAMEWORK_NAME}.framework"
+        [ -f "$(framework_resources_dir "$slice" "$published_fw")/COPYING.LGPLv2.1" ] \
+            || error "Published XCFramework slice ${slice} is missing COPYING.LGPLv2.1"
+        binary="${published_fw}/${FRAMEWORK_NAME}"
+        archs="$(lipo -archs "$binary")"
+        [ "$archs" = "arm64" ] \
+            || error "Published ${FRAMEWORK_NAME} slice ${slice} must be arm64-only (got: ${archs})"
+        build="$(vtool -show-build "$binary")"
+        platform="$(echo "$build" | awk '$1 == "platform" {print $2}')"
+        minos="$(echo "$build" | awk '$1 == "minos" {print $2}')"
+        [ "$platform" = "$(slice_build_platform "$slice")" ] && [ "$minos" = "$(slice_min_os "$slice")" ] \
+            || error "Published ${FRAMEWORK_NAME} slice ${slice} is built for ${platform:-?} ${minos:-?}, expected $(slice_build_platform "$slice") $(slice_min_os "$slice")"
+    done
 
     # Codesign the XCFramework when an identity is provided (Xcode 15+
     # surfaces and tracks binary-dependency signatures for consumers).
@@ -689,7 +769,7 @@ main() {
     command -v shasum >/dev/null || error "shasum not found in PATH"
     command -v git    >/dev/null || error "git not found in PATH; required to validate and apply FFmpeg patches"
 
-    log "FFmpeg XCFramework builder - macOS arm64, LGPL audio-only"
+    log "FFmpeg XCFramework builder - arm64 macOS + iOS + iOS Simulator, LGPL audio-only"
     [ "$MODE" = "--check-updates" ] && check_updates
     [ -z "$MODE" ] || error "Unknown argument '$MODE'. The build takes no version argument; edit upstream.lock to change what gets built (--check-updates to compare pins)."
     resolve_version
@@ -702,8 +782,11 @@ main() {
     clean_stale_state
     download_ffmpeg
     prepare_source
-    build_static_libs arm64
-    create_framework
+    local slice
+    for slice in "${SLICES[@]}"; do
+        build_static_libs "$slice"
+        create_framework "$slice"
+    done
     create_xcframework
     publish
     verify_swift_build

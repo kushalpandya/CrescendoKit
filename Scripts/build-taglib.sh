@@ -1,8 +1,9 @@
 #!/bin/bash
 #
-# build-taglib.sh - Builds TagLib + the CTagLib C shim as a macOS (Apple
-# silicon, arm64) STATIC XCFramework: the build input the Crescendo engine
-# folds into Crescendo.framework at archive time.
+# build-taglib.sh - Builds TagLib + the CTagLib C shim as an Apple silicon
+# (arm64) STATIC XCFramework with macOS, iOS/iPadOS device, and iOS Simulator
+# slices: the build input the Crescendo engine folds into its framework at
+# archive time.
 #
 # Outputs (staged under build/artifacts/):
 #   CTagLib.xcframework        static libCTagLib.a + ctaglib.h + module map;
@@ -41,7 +42,8 @@
 #     the recorded SHA-256 BEFORE extraction. TagLib publishes no release
 #     signatures, so the hash pin is the integrity anchor (recorded once,
 #     reviewed, then enforced on every build).
-#   - The archive must be arm64-only and contain the importable CTagLib module,
+#   - Every slice must be arm64-only, built for its platform at its floor,
+#     and contain the importable CTagLib module,
 #     and no non-hidden ctaglib_*/TagLib symbols, or the build fails.
 #   - The MPL license text must exist in the source tree and in the staged
 #     taglib-dist/, or the build fails.
@@ -73,6 +75,8 @@ LOG_FILE="${BUILD_DIR}/build.log"
 FRAMEWORK_NAME="CTagLib"
 DIST_DIR_NAME="taglib-dist"
 MIN_MACOS="15.0"
+MIN_IOS="18.0"
+SLICES=(macos-arm64 ios-arm64 ios-arm64-simulator)
 
 # Resolved by resolve_version from upstream.lock, the only source of truth
 # for what gets built. An empty hash means the pin is mid-update: the run
@@ -208,9 +212,13 @@ clean_stale_state() {
         "${BUILD_DIR}/install" \
         "${BUILD_DIR}/cmake-build" \
         "${BUILD_DIR}/static-build" \
+        "${BUILD_DIR}/static-headers" \
         "${BUILD_DIR}/framework-build" \
         "${BUILD_DIR}/frameworks" \
         "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
+    # Per-slice install, CMake, and shim trees.
+    find "$BUILD_DIR" -maxdepth 1 \( -name 'install-*' -o -name 'cmake-build-*' -o -name 'static-build-*' \) \
+        -exec rm -rf {} + 2>/dev/null || true
 }
 
 # Downloads and verifies the pinned source tarball, keeping the verified
@@ -241,14 +249,57 @@ download_taglib() {
     [ -d "$SRC_DIR" ] || error "Extraction did not produce ${SRC_DIR}"
 }
 
-# Builds a static libtag.a (Release, arm64, hidden visibility, hardened) and
-# installs it plus the public headers under build/taglib/install.
-build_taglib() {
-    PREFIX="${BUILD_DIR}/install"
-    local cmake_build="${BUILD_DIR}/cmake-build"
-    rm -rf "$PREFIX" "$cmake_build"
+# Slice helpers. Every slice is arm64: macOS, iOS/iPadOS devices, and the
+# iOS Simulator on Apple silicon hosts. The slice name doubles as the
+# XCFramework's library identifier.
+slice_sdk() {
+    case "$1" in
+        macos-arm64)         echo macosx ;;
+        ios-arm64)           echo iphoneos ;;
+        ios-arm64-simulator) echo iphonesimulator ;;
+        *) error "unknown slice $1" ;;
+    esac
+}
+slice_target() {
+    case "$1" in
+        macos-arm64)         echo "arm64-apple-macos${MIN_MACOS}" ;;
+        ios-arm64)           echo "arm64-apple-ios${MIN_IOS}" ;;
+        ios-arm64-simulator) echo "arm64-apple-ios${MIN_IOS}-simulator" ;;
+        *) error "unknown slice $1" ;;
+    esac
+}
+# The platform name otool reports for the slice's LC_BUILD_VERSION.
+slice_build_platform() {
+    case "$1" in
+        macos-arm64)         echo MACOS ;;
+        ios-arm64)           echo IOS ;;
+        ios-arm64-simulator) echo IOSSIMULATOR ;;
+    esac
+}
+slice_min_os() { case "$1" in macos-*) echo "$MIN_MACOS" ;; *) echo "$MIN_IOS" ;; esac; }
 
-    run_logged "Configuring TagLib ${TAGLIB_VERSION} (cmake, static, arm64, hardened)..." \
+# Builds a static libtag.a for one slice ($1; Release, arm64, hidden
+# visibility, hardened) and installs it plus the public headers under
+# build/taglib/install-<slice>. iOS slices cross-compile with CMake's iOS
+# system name against the device or simulator SDK.
+build_taglib() {
+    local slice="$1"
+    local prefix="${BUILD_DIR}/install-${slice}"
+    local cmake_build="${BUILD_DIR}/cmake-build-${slice}"
+    local platform_flags=()
+    rm -rf "$prefix" "$cmake_build"
+
+    if [[ "$slice" == macos-* ]]; then
+        platform_flags=(-DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_MACOS}")
+    else
+        platform_flags=(
+            -DCMAKE_SYSTEM_NAME=iOS
+            -DCMAKE_OSX_SYSROOT="$(slice_sdk "$slice")"
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_IOS}"
+        )
+    fi
+
+    run_logged "Configuring TagLib ${TAGLIB_VERSION} (${slice}, cmake, static, hardened)..." \
         "$CMAKE" -S "$SRC_DIR" -B "$cmake_build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_SHARED_LIBS=OFF \
@@ -257,19 +308,19 @@ build_taglib() {
         -DBUILD_TESTING=OFF \
         -DWITH_ZLIB=ON \
         -DCMAKE_OSX_ARCHITECTURES="arm64" \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET="${MIN_MACOS}" \
+        "${platform_flags[@]}" \
         -DCMAKE_CXX_VISIBILITY_PRESET=hidden \
         -DCMAKE_VISIBILITY_INLINES_HIDDEN=ON \
         -DCMAKE_CXX_FLAGS="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -DTRACE_IN_RELEASE" \
-        -DCMAKE_INSTALL_PREFIX="$PREFIX"
+        -DCMAKE_INSTALL_PREFIX="$prefix"
 
-    run_logged "Compiling TagLib..." "$CMAKE" --build "$cmake_build" -j"$(sysctl -n hw.ncpu)"
-    run_logged "Installing TagLib..." "$CMAKE" --install "$cmake_build"
+    run_logged "Compiling TagLib (${slice})..." "$CMAKE" --build "$cmake_build" -j"$(sysctl -n hw.ncpu)"
+    run_logged "Installing TagLib (${slice})..." "$CMAKE" --install "$cmake_build"
 
-    [ -f "${PREFIX}/lib/libtag.a" ] || error "TagLib build did not produce libtag.a"
+    [ -f "${prefix}/lib/libtag.a" ] || error "TagLib build did not produce libtag.a for ${slice}"
 }
 
-# Compiles the C shim as an arm64 object, matching the libtag.a it will be
+# Compiles the C shim for one slice ($1), matching the libtag.a it will be
 # merged with.
 #
 # -DTRACE_IN_RELEASE (both here and in the CMake flags) keeps TagLib's
@@ -277,32 +328,32 @@ build_taglib() {
 # (ctaglib_set_log_callback) has something to deliver; without it every call
 # site compiles to a no-op under NDEBUG.
 compile_shim() {
-    WORK_DIR="${BUILD_DIR}/static-build"
-    rm -rf "$WORK_DIR"
-    mkdir -p "$WORK_DIR"
+    local slice="$1" sdk sysroot
+    local work="${BUILD_DIR}/static-build-${slice}"
+    rm -rf "$work"
+    mkdir -p "$work"
 
-    log "Compiling the CTagLib shim..."
+    log "Compiling the CTagLib shim (${slice})..."
 
-    local sysroot
-    sysroot="$(xcrun -sdk macosx --show-sdk-path)"
+    sdk="$(slice_sdk "$slice")"
+    sysroot="$(xcrun -sdk "$sdk" --show-sdk-path)"
 
-    xcrun -sdk macosx clang++ \
+    xcrun -sdk "$sdk" clang++ \
         -c "${SHIM_DIR}/ctaglib.cpp" \
-        -o "${WORK_DIR}/ctaglib.o" \
+        -o "${work}/ctaglib.o" \
         -std=c++17 \
-        -arch arm64 \
-        -mmacosx-version-min="${MIN_MACOS}" \
+        -target "$(slice_target "$slice")" \
         -isysroot "$sysroot" \
         -I"${SHIM_DIR}" \
-        -I"${PREFIX}/include/taglib" \
+        -I"${BUILD_DIR}/install-${slice}/include/taglib" \
         -DTAGLIB_STATIC \
         -DTRACE_IN_RELEASE \
         -O2 \
         "${HARDENING_FLAGS[@]}"
 }
 
-# Merges the shim object and libtag.a into the single static archive the
-# engine links. FileRef references every format parser directly, so the
+# Merges one slice's shim object and libtag.a into the single static archive
+# the engine links. FileRef references every format parser directly, so the
 # engine's normal link pulls them all in (full format coverage). Nothing here
 # is stripped or exported: every symbol is hidden-visibility, resolves when
 # the engine links the archive, and the engine's own post-dSYM `strip -x`
@@ -310,22 +361,26 @@ compile_shim() {
 # system library; the engine adds -lz (Package.swift linkerSettings) because
 # a static archive cannot carry link flags.
 create_static_library() {
-    log "Merging shim + libtag.a into libCTagLib.a..."
+    local slice="$1"
+    local work="${BUILD_DIR}/static-build-${slice}"
+    log "Merging shim + libtag.a into libCTagLib.a (${slice})..."
     xcrun libtool -static \
-        -o "${WORK_DIR}/libCTagLib.a" \
-        "${WORK_DIR}/ctaglib.o" \
-        "${PREFIX}/lib/libtag.a"
+        -o "${work}/libCTagLib.a" \
+        "${work}/ctaglib.o" \
+        "${BUILD_DIR}/install-${slice}/lib/libtag.a"
 }
 
-# Packages the archive as a library-form XCFramework: the canonical SwiftPM
-# shape for a static binary target. SwiftPM/xcodebuild surface Headers/ (with
-# the module map) at compile time, so `internal import CTagLib` resolves, and
-# pass the .a as a link input per arch, so the engine archive folds the
-# objects into Crescendo.framework. A plain (non-framework)
-# module map because there is no framework bundle anymore.
+# Packages the archives as one library-form XCFramework: the canonical
+# SwiftPM shape for a static binary target. SwiftPM/xcodebuild surface
+# Headers/ (with the module map) at compile time, so `internal import
+# CTagLib` resolves, and pass the slice's .a as a link input, so the engine
+# archive folds the objects into the engine framework. A plain (non-framework)
+# module map because there is no framework bundle. The headers are
+# platform-independent, so every slice carries the same copy.
 create_xcframework() {
     local xcfw="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework"
-    local hdrs="${WORK_DIR}/Headers"
+    local hdrs="${BUILD_DIR}/static-headers"
+    local args=() slice
     rm -rf "$xcfw" "$hdrs"
     mkdir -p "$hdrs"
 
@@ -337,61 +392,73 @@ module ${FRAMEWORK_NAME} {
 }
 MODULEMAP
 
-    run_logged "Packaging static XCFramework..." xcodebuild -create-xcframework \
-        -library "${WORK_DIR}/libCTagLib.a" \
-        -headers "$hdrs" \
+    for slice in "${SLICES[@]}"; do
+        args+=(-library "${BUILD_DIR}/static-build-${slice}/libCTagLib.a" -headers "$hdrs")
+    done
+    run_logged "Packaging static XCFramework (${SLICES[*]})..." xcodebuild -create-xcframework \
+        "${args[@]}" \
         -output "$xcfw"
 }
 
-# Fail-closed checks on the packaged archive: arm64-only, the shim
-# actually in it, nothing that would leak into Crescendo's exported ABI, and
-# the CTagLib module importable exactly as the engine will import it.
+# Fail-closed checks on every packaged slice: arm64-only, built for the
+# slice's platform at its floor, the shim actually in it, nothing that would
+# leak into the engine's exported ABI, and the CTagLib module importable
+# exactly as the engine will import it.
 verify_artifact() {
-    local slice="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64"
-    local lib="${slice}/libCTagLib.a"
-    [ -f "$lib" ] || error "Packaged XCFramework has no macos-arm64/libCTagLib.a slice"
+    log "Verifying the static archives..."
 
-    log "Verifying the static archive..."
+    local slice dir lib archs build platform minos leaks symbol
+    for slice in "${SLICES[@]}"; do
+        dir="${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/${slice}"
+        lib="${dir}/libCTagLib.a"
+        [ -f "$lib" ] || error "Packaged XCFramework has no ${slice}/libCTagLib.a slice"
 
-    local archs
-    archs="$(lipo -archs "$lib")"
-    [ "$archs" = "arm64" ] || error "libCTagLib.a must be arm64-only (got: ${archs})"
+        archs="$(lipo -archs "$lib")"
+        [ "$archs" = "arm64" ] || error "libCTagLib.a (${slice}) must be arm64-only (got: ${archs})"
 
-    # Symbol posture per arch: the shim must be present, and no ctaglib_* or
-    # TagLib C++ symbol may be plain-external (only `private external`, the
-    # archive-level form of hidden visibility, becomes a non-exported local
-    # when the engine links the archive). grep runs without -q: under
-    # pipefail an early -q exit SIGPIPEs nm mid-listing and fails the
-    # pipeline even on a match.
-    local arch leaks symbol
-    for arch in arm64; do
-        # One representative symbol per shim surface (base read, options
-        # read, chapters), so a packaged archive/header mismatch in any
-        # surface fails here instead of at the engine link.
+        # Every member of the archive must target the slice's platform at
+        # its floor; a stray object from another SDK would fail the engine
+        # link (or, worse, link and misbehave).
+        build="$(otool -lv "$lib" 2>/dev/null | awk '/cmd LC_BUILD_VERSION/ {b=1} b && $1 == "platform" {p=$2} b && $1 == "minos" {print p, $2; b=0}' | sort -u)"
+        [ "$build" = "$(slice_build_platform "$slice") $(slice_min_os "$slice")" ] \
+            || error "libCTagLib.a (${slice}) objects are built for [${build//$'\n'/, }], expected $(slice_build_platform "$slice") $(slice_min_os "$slice")"
+
+        # Symbol posture: the shim must be present, and no ctaglib_* or
+        # TagLib C++ symbol may be plain-external (only `private external`,
+        # the archive-level form of hidden visibility, becomes a non-exported
+        # local when the engine links the archive). grep runs without -q:
+        # under pipefail an early -q exit SIGPIPEs nm mid-listing and fails
+        # the pipeline even on a match. One representative symbol per shim
+        # surface (base read, options read, chapters), so a packaged
+        # archive/header mismatch in any surface fails here instead of at the
+        # engine link.
         for symbol in _ctaglib_read _ctaglib_read_with _ctaglib_chapter_count; do
-            nm -arch "$arch" "$lib" 2>/dev/null | grep " ${symbol}\$" > /dev/null \
-                || error "libCTagLib.a (${arch}) does not define ${symbol#_}; the shim is incomplete"
+            nm "$lib" 2>/dev/null | grep " ${symbol}\$" > /dev/null \
+                || error "libCTagLib.a (${slice}) does not define ${symbol#_}; the shim is incomplete"
         done
         # Only DEFINED plain-external symbols can export; undefined externals
         # are the shim's references into libtag.a, resolved intra-archive at
         # the engine link, and are expected.
-        leaks="$(nm -arch "$arch" -m "$lib" 2>/dev/null \
+        leaks="$(nm -m "$lib" 2>/dev/null \
             | grep ' external ' | grep -v 'private external' \
             | grep -v '(undefined)' \
             | grep -E '_ctaglib_|N6TagLib' || true)"
-        [ -z "$leaks" ] || error "libCTagLib.a (${arch}) has default-visibility symbols that would export from Crescendo:
+        [ -z "$leaks" ] || error "libCTagLib.a (${slice}) has default-visibility symbols that would export from the engine:
 ${leaks}"
-    done
-    log "  Symbols: hidden (nothing would export from Crescendo)"
 
-    # Import probe: type-check a Swift snippet against the packaged headers,
-    # proving the module map + header the engine will consume actually work.
-    printf 'internal import CTagLib\nlet probe: Void = { _ = ctaglib_read; _ = ctaglib_read_with; _ = ctaglib_chapter_count; _ = ctaglib_chapter_picture_data }()\n' \
-        > "${WORK_DIR}/import-probe.swift"
-    xcrun swiftc -typecheck "${WORK_DIR}/import-probe.swift" \
-        -I "${slice}/Headers" >> "$LOG_FILE" 2>&1 \
-        || error "The CTagLib module does not import from the packaged headers - see ${LOG_FILE}"
-    log "  Module: imports cleanly"
+        # Import probe: type-check a Swift snippet against the packaged
+        # headers for the slice's own target, proving the module map +
+        # header the engine will consume actually work there.
+        printf 'internal import CTagLib\nlet probe: Void = { _ = ctaglib_read; _ = ctaglib_read_with; _ = ctaglib_chapter_count; _ = ctaglib_chapter_picture_data }()\n' \
+            > "${BUILD_DIR}/import-probe.swift"
+        xcrun -sdk "$(slice_sdk "$slice")" swiftc -typecheck "${BUILD_DIR}/import-probe.swift" \
+            -target "$(slice_target "$slice")" \
+            -I "${dir}/Headers" >> "$LOG_FILE" 2>&1 \
+            || error "The CTagLib module does not import from the packaged ${slice} headers - see ${LOG_FILE}"
+    done
+    log "  Slices: ${SLICES[*]} (arm64, platform + floor verified)"
+    log "  Symbols: hidden (nothing would export from the engine)"
+    log "  Module: imports cleanly for every slice"
 }
 
 # Stages the license and provenance material beside the artifact. SwiftPM
@@ -462,11 +529,17 @@ NOTICE
     # hash here against the lock, the current shim/script sources, and the
     # staged archive, so a stale static CTagLib can never fold into a release
     # silently (the static replacement for the retired zip-restage rule).
-    local shim_h_sha shim_cpp_sha script_sha lib_sha
+    local shim_h_sha shim_cpp_sha script_sha lib_sha slice slice_libs=""
     shim_h_sha="$(shasum -a 256 "${SHIM_DIR}/ctaglib.h" | awk '{print $1}')"
     shim_cpp_sha="$(shasum -a 256 "${SHIM_DIR}/ctaglib.cpp" | awk '{print $1}')"
     script_sha="$(shasum -a 256 "${SCRIPT_DIR}/build-taglib.sh" | awk '{print $1}')"
     lib_sha="$(shasum -a 256 "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/macos-arm64/libCTagLib.a" | awk '{print $1}')"
+    # Every slice's archive is bound too (staticLibSha256 stays the macOS one
+    # for the release flow's existing check).
+    for slice in "${SLICES[@]}"; do
+        [ -n "$slice_libs" ] && slice_libs+=$',\n'
+        slice_libs+="    \"${slice}\": \"$(shasum -a 256 "${BUILD_DIR}/${FRAMEWORK_NAME}.xcframework/${slice}/libCTagLib.a" | awk '{print $1}')\""
+    done
 
     cat > "$dist/taglib-static.json" << JSON
 {
@@ -479,7 +552,10 @@ NOTICE
     "ctaglib.cpp": "${shim_cpp_sha}",
     "build-taglib.sh": "${script_sha}"
   },
-  "staticLibSha256": "${lib_sha}"
+  "staticLibSha256": "${lib_sha}",
+  "staticLibs": {
+${slice_libs}
+  }
 }
 JSON
 
@@ -552,7 +628,7 @@ main() {
     command -v python3 >/dev/null || error "python3 not found in PATH"
     find_cmake
 
-    log "TagLib static XCFramework builder - macOS arm64, MPL 1.1"
+    log "TagLib static XCFramework builder - arm64 macOS + iOS + iOS Simulator, MPL 1.1"
     [ "$MODE" = "--check-updates" ] && check_updates
     [ -z "$MODE" ] || error "Unknown argument '$MODE'. The build takes no version argument; edit upstream.lock to change what gets built (--check-updates to compare pins)."
     resolve_version
@@ -564,9 +640,12 @@ main() {
 
     clean_stale_state
     download_taglib
-    build_taglib
-    compile_shim
-    create_static_library
+    local slice
+    for slice in "${SLICES[@]}"; do
+        build_taglib "$slice"
+        compile_shim "$slice"
+        create_static_library "$slice"
+    done
     create_xcframework
     verify_artifact
     stage_licenses
