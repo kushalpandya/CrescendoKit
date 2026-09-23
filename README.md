@@ -27,6 +27,29 @@ distribution; the engine is what you use):
 import Crescendo
 ```
 
+### CrescendoLite
+
+A second product, `CrescendoLite`, is the same engine built without FFmpeg: decoding goes through
+CoreAudio only (MP3, AAC/ALAC/M4A, FLAC, WAV/AIFF/CAF, plus whatever else the OS decodes, and
+MP3/AAC network streams), and the app embeds a single framework with no LGPL component. The public
+API is identical, so an app can switch between the two by changing only the product it depends on
+and the import:
+
+```swift
+.product(name: "CrescendoLite", package: "CrescendoKit")
+```
+
+```swift
+#if canImport(CrescendoLite)
+import CrescendoLite
+#else
+import Crescendo
+#endif
+```
+
+Formats only FFmpeg can decode (for example WavPack, APE, DSD, WMA, Matroska, HLS streams) fail to
+open with `CrescendoError.unsupportedFormat` under Lite and are absent from `supportedFormats`.
+
 ## Documentation
 
 API documentation for the latest release is published at
@@ -40,6 +63,7 @@ Release packages include prebuilt XCFrameworks (macOS 15 or later, Apple Silicon
 | ----------------------- | -------------------------------------------------------- | ------------------------------ |
 | `CFFmpeg.xcframework`   | FFmpeg, audio-only LGPL build, dynamically linked        | LGPL 2.1+                      |
 | `Crescendo.xcframework` | The playback engine with TagLib statically embedded      | Proprietary (EULA) + MPL 1.1   |
+| `CrescendoLite.xcframework` | The same engine without FFmpeg, TagLib embedded      | Proprietary (EULA) + MPL 1.1   |
 | `Crescendo.doccarchive` | Public API documentation                                 | Proprietary (EULA)             |
 
 `Crescendo.xcframework` is a mixed-license artifact: the proprietary engine
@@ -82,7 +106,7 @@ See [LICENSE.md](LICENSE.md) for the full map. In short:
   (`Resources/COPYING.LGPLv2.1`), and the exact source version, configure
   flags, and build script live in this repository.
 - **TagLib** is dual LGPL 2.1 / MPL 1.1; this distribution elects the
-  **MPL 1.1** and embeds TagLib statically inside `Crescendo.xcframework`
+  **MPL 1.1** and embeds TagLib statically inside `Crescendo.xcframework` and `CrescendoLite.xcframework`
   (the MPL's file-level copyleft permits this in a proprietary Larger Work).
   The license text and a notice identifying the exact version and
   corresponding source ship inside the framework (`Resources/COPYING.MPL`,

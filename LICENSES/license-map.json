@@ -18,6 +18,22 @@
         "TagLib-NOTICE.txt"
       ]
     },
+    "CrescendoLite.xcframework": {
+      "license": "Proprietary (Crescendo EULA)",
+      "embeddedComponents": [
+        {
+          "name": "TagLib",
+          "license": "MPL-1.1",
+          "linkage": "static",
+          "correspondingSourceRequired": true
+        }
+      ],
+      "requiredResources": [
+        "Crescendo-EULA.txt",
+        "COPYING.MPL",
+        "TagLib-NOTICE.txt"
+      ]
+    },
     "CFFmpeg.xcframework": {
       "license": "LGPL-2.1-or-later",
       "embeddedComponents": [],

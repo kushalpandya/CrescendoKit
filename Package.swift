@@ -4,18 +4,24 @@ import PackageDescription
 
 // CrescendoKit: binary distribution of the Crescendo audio engine.
 //
-// Vends two prebuilt XCFrameworks as one product:
-//   - Crescendo  (the engine; a mixed-license artifact: the proprietary
-//                 Crescendo binary with the TagLib metadata library
-//                 statically embedded under the MPL 1.1 - see LICENSE.md
-//                 and the COPYING.MPL / TagLib-NOTICE.txt inside the
-//                 framework's Resources)
-//   - CFFmpeg    (FFmpeg, LGPL 2.1+, dynamically linked and replaceable)
+// Vends three prebuilt XCFrameworks as two products:
+//   - Crescendo      (the engine; a mixed-license artifact: the proprietary
+//                     Crescendo binary with the TagLib metadata library
+//                     statically embedded under the MPL 1.1 - see LICENSE.md
+//                     and the COPYING.MPL / TagLib-NOTICE.txt inside the
+//                     framework's Resources)
+//   - CFFmpeg        (FFmpeg, LGPL 2.1+, dynamically linked and replaceable)
+//   - CrescendoLite  (the same engine built without FFmpeg: CoreAudio
+//                     decoding only, TagLib embedded the same way, and an
+//                     identical public API)
 //
-// The product lists both targets because SwiftPM binary targets cannot
-// declare dependencies on each other: Crescendo.framework links CFFmpeg via
-// @rpath, and listing them together makes every consumer embed the pair
-// automatically. Consumers `import Crescendo`.
+// Product `Crescendo` lists Crescendo + CFFmpeg because SwiftPM binary
+// targets cannot declare dependencies on each other: Crescendo.framework
+// links CFFmpeg via @rpath, and listing them together makes every consumer
+// embed the pair automatically. Product `CrescendoLite` is the single
+// CrescendoLite framework. Consumers depend on exactly one product and
+// `import Crescendo` or `import CrescendoLite`; since the API is identical,
+// switching products needs no other source change.
 //
 // Two consumption modes per target:
 //
@@ -38,11 +44,21 @@ let crescendoChecksum = "2bb7bb4ed40f5ab5bc8f1bf1da30a7298f2d969980420aab93e7de1
 let cffmpegURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v1.2.3/CFFmpeg.xcframework.zip"
 let cffmpegChecksum = "607187a9e92d82817580c12a8d924f75b567707872e2da6d8fe248daa359d9f7"
 
+let crescendoLiteURL = "https://github.com/kushalpandya/CrescendoKit/releases/download/v0.0.0/CrescendoLite.xcframework.zip"
+let crescendoLiteChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
+
 let placeholderChecksum = "0000000000000000000000000000000000000000000000000000000000000000"
 
 let useLocal = ProcessInfo.processInfo.environment["CRESCENDOKIT_LOCAL"] == "1"
     || crescendoChecksum == placeholderChecksum
     || cffmpegChecksum == placeholderChecksum
+
+// CrescendoLite is declared only once it is real: in local mode (the release
+// flow's gates stage it) or after the release that introduces it rewrites its
+// checksum. Until then the target is omitted rather than pointed at a missing
+// local artifact, which would stop SwiftPM loading the package at all and
+// break every consumer of the already-published Crescendo product.
+let liteAvailable = useLocal || crescendoLiteChecksum != placeholderChecksum
 
 func binaryTarget(name: String, url: String, checksum: String) -> Target {
     useLocal
@@ -57,9 +73,11 @@ let package = Package(
     ],
     products: [
         .library(name: "Crescendo", targets: ["Crescendo", "CFFmpeg"])
-    ],
+    ] + (liteAvailable ? [.library(name: "CrescendoLite", targets: ["CrescendoLite"])] : []),
     targets: [
         binaryTarget(name: "Crescendo", url: crescendoURL, checksum: crescendoChecksum),
         binaryTarget(name: "CFFmpeg", url: cffmpegURL, checksum: cffmpegChecksum)
-    ]
+    ] + (liteAvailable
+        ? [binaryTarget(name: "CrescendoLite", url: crescendoLiteURL, checksum: crescendoLiteChecksum)]
+        : [])
 )

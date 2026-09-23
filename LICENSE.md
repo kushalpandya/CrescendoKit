@@ -7,12 +7,14 @@ binary artifacts themselves.
 | What                                                         | License                                                                                                                                             |
 | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | This repository's source (scripts, `Shims/`, manifest, docs) | [MIT](LICENSES/MIT.txt)                                                                                                                             |
-| `Crescendo.xcframework`, `Crescendo.doccarchive`             | [Crescendo EULA](LICENSES/Crescendo-EULA.txt); embedded TagLib under MPL 1.1 (`Resources/COPYING.MPL` and `Resources/TagLib-NOTICE.txt` inside the framework) |
+| `Crescendo.xcframework`, `CrescendoLite.xcframework`, `Crescendo.doccarchive` | [Crescendo EULA](LICENSES/Crescendo-EULA.txt); embedded TagLib under MPL 1.1 (`Resources/COPYING.MPL` and `Resources/TagLib-NOTICE.txt` inside the framework) |
 | `CFFmpeg.xcframework`                                        | LGPL 2.1+ (`Resources/COPYING.LGPLv2.1` inside the framework)                                                                                       |
 
 ## The Crescendo engine
 
-`Crescendo.xcframework` is a mixed-license artifact. The engine itself is a
+`Crescendo.xcframework` and `CrescendoLite.xcframework` (the same engine
+built without FFmpeg) are mixed-license artifacts licensed identically; what
+this section says of one applies to both. The engine itself is a
 proprietary binary: the [Crescendo EULA](LICENSES/Crescendo-EULA.txt) defines
 the narrow scope of permitted use, and a copy of it is embedded in the
 framework's `Resources/`. Use beyond that scope requires written permission.
@@ -26,7 +28,8 @@ FFmpeg is built LGPL-only (no GPL, no non-free components) and consumed as a
 dynamic framework, keeping it replaceable per LGPL section 6.
 
 TagLib is dual LGPL 2.1 / MPL 1.1; this distribution elects the MPL 1.1 and
-links it statically into `Crescendo.xcframework`. The MPL's file-level
+links it statically into `Crescendo.xcframework` and
+`CrescendoLite.xcframework`. The MPL's file-level
 copyleft covers the TagLib sources themselves, not the unrelated proprietary
 Crescendo code in the same binary. TagLib's source is used unmodified, and the
 exact verified source archive (`taglib-<version>.tar.gz`, SHA-256 recorded in

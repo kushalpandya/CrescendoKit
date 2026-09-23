@@ -425,9 +425,10 @@ stage_licenses() {
     # engine is built, so shipped frameworks name their release-specific
     # source location.
     cat > "$dist/TagLib-NOTICE.txt" << NOTICE
-TagLib Notice for Crescendo.framework
+TagLib Notice for Crescendo.framework and CrescendoLite.framework
 
-Crescendo.framework statically incorporates the TagLib audio metadata
+Crescendo.framework and CrescendoLite.framework (the same engine built
+without FFmpeg) each statically incorporate the TagLib audio metadata
 library, version ${TAGLIB_VERSION} (https://taglib.org).
 
 TagLib is dual-licensed under the GNU Lesser General Public License
