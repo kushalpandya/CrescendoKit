@@ -18,8 +18,8 @@
 #   4. Adopt the printed hash here, commit the change for review, and rerun
 #      to build. Never copy a hash you have not deliberately chosen.
 
-FFMPEG_VERSION=9.0.1
-FFMPEG_SHA256=cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635
+FFMPEG_VERSION=9.0.2
+FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 
-TAGLIB_VERSION=2.3.1
-TAGLIB_SHA256=a19d90e6fd41d09a0281ec0fe762d51491d7a6ccffc923c4f7868c5e647ca230
+TAGLIB_VERSION=2.3.2
+TAGLIB_SHA256=3ca2d8afaa7f1cf7f6ed10e511ebc368bfacd6dcaa3dbfa690b89e502e8963dc
